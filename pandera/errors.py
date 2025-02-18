@@ -1,8 +1,9 @@
 """pandera-specific errors."""
 
+import json
 import warnings
 from enum import Enum
-from typing import Any, Dict, List, NamedTuple
+from typing import Any, Dict, List, NamedTuple, Union
 
 
 class BackendNotFoundError(Exception):
@@ -27,9 +28,11 @@ class ReducedPickleExceptionBase(Exception):
         representation.
         """
         state = {
-            key: str(val)
-            if key in self.TO_STRING_KEYS and val is not None
-            else val
+            key: (
+                str(val)
+                if key in self.TO_STRING_KEYS and val is not None
+                else val
+            )
             for key, val in self.__dict__.items()
         }
         state["args"] = self.args  # message may not be in __dict__
@@ -57,11 +60,12 @@ class ReducedPickleExceptionBase(Exception):
 class ParserError(ReducedPickleExceptionBase):
     """Raised when data cannot be parsed from the raw into its clean form."""
 
-    TO_STRING_KEYS = ["failure_cases"]
+    TO_STRING_KEYS = ["failure_cases", "parser_output"]
 
-    def __init__(self, message, failure_cases):
+    def __init__(self, message, failure_cases, parser_output=None):
         super().__init__(message)
         self.failure_cases = failure_cases
+        self.parser_output = parser_output
 
 
 class SchemaInitError(Exception):
@@ -81,7 +85,10 @@ class SchemaError(ReducedPickleExceptionBase):
         "failure_cases",
         "check",
         "check_output",
+        "parser",
+        "parser_output",
         "reason_code",
+        "column_name",
     ]
 
     def __init__(
@@ -93,7 +100,11 @@ class SchemaError(ReducedPickleExceptionBase):
         check=None,
         check_index=None,
         check_output=None,
+        parser=None,
+        parser_index=None,
+        parser_output=None,
         reason_code=None,
+        column_name=None,
     ):
         super().__init__(message)
         self.schema = schema
@@ -102,7 +113,11 @@ class SchemaError(ReducedPickleExceptionBase):
         self.check = check
         self.check_index = check_index
         self.check_output = check_output
+        self.parser = parser
+        self.parser_index = parser_index
+        self.parser_output = parser_output
         self.reason_code = reason_code
+        self.column_name = column_name
 
 
 class SchemaWarning(UserWarning):
@@ -113,28 +128,11 @@ class BaseStrategyOnlyError(Exception):
     """Custom error for reporting strategies that must be base strategies."""
 
 
-SCHEMA_ERRORS_SUFFIX = """
-
-Usage Tip
----------
-
-Directly inspect all errors by catching the exception:
-
-```
-try:
-    schema.validate(dataframe, lazy=True)
-except SchemaErrors as err:
-    err.failure_cases  # dataframe of schema errors
-    err.data  # invalid dataframe
-```
-"""
-
-
 class FailureCaseMetadata(NamedTuple):
     """Consolidated failure cases, summary message, and error counts."""
 
     failure_cases: Any
-    message: str
+    message: Dict[str, Any]
     error_counts: Dict[str, int]
 
 
@@ -150,15 +148,18 @@ class SchemaErrorReason(Enum):
     SCHEMA_COMPONENT_CHECK = "schema_component_check"
     DATAFRAME_CHECK = "dataframe_check"
     CHECK_ERROR = "check_error"
+    SCHEMA_COMPONENT_PARSER = "schema_component_parser"
+    DATAFRAME_PARSER = "dataframe_parser"
+    PARSER_ERROR = "parser_error"
     DUPLICATES = "duplicates"
     WRONG_FIELD_NAME = "wrong_field_name"
     SERIES_CONTAINS_NULLS = "series_contains_nulls"
     SERIES_CONTAINS_DUPLICATES = "series_contains_duplicates"
-    SERIES_CHECK = "series_check"
     WRONG_DATATYPE = "wrong_dtype"
-    INDEX_CHECK = "index_check"
     NO_ERROR = "no_errors"
     ADD_MISSING_COLUMN_NO_DEFAULT = "add_missing_column_no_default"
+    INVALID_COLUMN_NAME = "invalid_column_name"
+    MISMATCH_INDEX = "mismatch_index"
 
 
 class SchemaErrors(ReducedPickleExceptionBase):
@@ -173,19 +174,24 @@ class SchemaErrors(ReducedPickleExceptionBase):
     def __init__(
         self,
         schema,
-        schema_errors: List[SchemaError],
+        schema_errors: Union[List[SchemaError]],
         data: Any,
     ):
         self.schema = schema
         self.schema_errors = schema_errors
         self.data = data
 
-        failure_cases_metadata = schema.get_backend(
-            data
-        ).failure_cases_metadata(schema.name, schema_errors)
+        backend = schema.get_backend(data)
+        failure_cases_metadata = backend.failure_cases_metadata(
+            schema.name, schema_errors
+        )
         self.error_counts = failure_cases_metadata.error_counts
         self.failure_cases = failure_cases_metadata.failure_cases
+        self.message = failure_cases_metadata.message
         super().__init__(failure_cases_metadata.message)
+
+    def __str__(self):
+        return json.dumps(self.message, indent=4)
 
 
 class PysparkSchemaError(ReducedPickleExceptionBase):

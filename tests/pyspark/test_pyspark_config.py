@@ -1,17 +1,23 @@
 """This module is to test the behaviour change based on defined config in pandera"""
+
 # pylint:disable=import-outside-toplevel,abstract-method
 
 import pyspark.sql.types as T
+import pytest
 
-from pandera.config import CONFIG, ValidationDepth
+from pandera.config import ValidationDepth, config_context, get_config_context
 from pandera.pyspark import (
     Check,
-    DataFrameSchema,
     Column,
     DataFrameModel,
+    DataFrameSchema,
     Field,
 )
 from tests.pyspark.conftest import spark_df
+
+pytestmark = pytest.mark.parametrize(
+    "spark_session", ["spark", "spark_connect"]
+)
 
 
 class TestPanderaConfig:
@@ -19,12 +25,12 @@ class TestPanderaConfig:
 
     sample_data = [("Bread", 9), ("Cutter", 15)]
 
-    def test_disable_validation(self, spark, sample_spark_schema):
+    def test_disable_validation(
+        self, spark_session, sample_spark_schema, request
+    ):
         """This function validates that a none object is loaded if validation is disabled"""
-
-        CONFIG.validation_enabled = False
-
-        pandra_schema = DataFrameSchema(
+        spark = request.getfixturevalue(spark_session)
+        pandera_schema = DataFrameSchema(
             {
                 "product": Column(T.StringType(), Check.str_startswith("B")),
                 "price_val": Column(T.IntegerType()),
@@ -34,26 +40,27 @@ class TestPanderaConfig:
         class TestSchema(DataFrameModel):
             """Test Schema class"""
 
-            product: T.StringType() = Field(str_startswith="B")
-            price_val: T.StringType() = Field()
+            product: T.StringType = Field(str_startswith="B")
+            price_val: T.StringType = Field()
 
         input_df = spark_df(spark, self.sample_data, sample_spark_schema)
         expected = {
             "validation_enabled": False,
             "validation_depth": ValidationDepth.SCHEMA_AND_DATA,
+            "cache_dataframe": False,
+            "keep_cached_dataframe": False,
         }
 
-        assert CONFIG.dict() == expected
-        assert pandra_schema.validate(input_df) is None
-        assert TestSchema.validate(input_df) is None
+        with config_context(validation_enabled=False):
+            assert get_config_context().dict() == expected
+            assert pandera_schema.validate(input_df) == input_df
+            assert TestSchema.validate(input_df) == input_df
 
     # pylint:disable=too-many-locals
-    def test_schema_only(self, spark, sample_spark_schema):
+    def test_schema_only(self, spark_session, sample_spark_schema, request):
         """This function validates that only schema related checks are run not data level"""
-        CONFIG.validation_enabled = True
-        CONFIG.validation_depth = ValidationDepth.SCHEMA_ONLY
-
-        pandra_schema = DataFrameSchema(
+        spark = request.getfixturevalue(spark_session)
+        pandera_schema = DataFrameSchema(
             {
                 "product": Column(T.StringType(), Check.str_startswith("B")),
                 "price_val": Column(T.IntegerType()),
@@ -63,11 +70,18 @@ class TestPanderaConfig:
         expected = {
             "validation_enabled": True,
             "validation_depth": ValidationDepth.SCHEMA_ONLY,
+            "cache_dataframe": False,
+            "keep_cached_dataframe": False,
         }
-        assert CONFIG.dict() == expected
-
         input_df = spark_df(spark, self.sample_data, sample_spark_schema)
-        output_dataframeschema_df = pandra_schema.validate(input_df)
+
+        with config_context(
+            validation_enabled=True,
+            validation_depth=ValidationDepth.SCHEMA_ONLY,
+        ):
+            assert get_config_context().dict() == expected
+            output_dataframeschema_df = pandera_schema.validate(input_df)
+
         expected_dataframeschema = {
             "SCHEMA": {
                 "COLUMN_NOT_IN_DATAFRAME": [
@@ -76,7 +90,7 @@ class TestPanderaConfig:
                         "column": None,
                         "error": "column "
                         "'price_val' not "
-                        "in dataframe\n"
+                        "in dataframe "
                         "Row(product='Bread', "
                         "price=9)",
                         "schema": None,
@@ -96,10 +110,14 @@ class TestPanderaConfig:
         class TestSchema(DataFrameModel):
             """Test Schema"""
 
-            product: T.StringType() = Field(str_startswith="B")
-            price_val: T.StringType() = Field()
+            product: T.StringType = Field(str_startswith="B")
+            price_val: T.StringType = Field()
 
-        output_dataframemodel_df = TestSchema.validate(input_df)
+        with config_context(
+            validation_enabled=True,
+            validation_depth=ValidationDepth.SCHEMA_ONLY,
+        ):
+            output_dataframemodel_df = TestSchema.validate(input_df)
 
         expected_dataframemodel = {
             "SCHEMA": {
@@ -109,7 +127,7 @@ class TestPanderaConfig:
                         "column": "TestSchema",
                         "error": "column "
                         "'price_val' not "
-                        "in dataframe\n"
+                        "in dataframe "
                         "Row(product='Bread', "
                         "price=9)",
                         "schema": "TestSchema",
@@ -127,12 +145,10 @@ class TestPanderaConfig:
         )
 
     # pylint:disable=too-many-locals
-    def test_data_only(self, spark, sample_spark_schema):
+    def test_data_only(self, spark_session, sample_spark_schema, request):
         """This function validates that only data related checks are run not schema level"""
-        CONFIG.validation_enabled = True
-        CONFIG.validation_depth = ValidationDepth.DATA_ONLY
-
-        pandra_schema = DataFrameSchema(
+        spark = request.getfixturevalue(spark_session)
+        pandera_schema = DataFrameSchema(
             {
                 "product": Column(T.StringType(), Check.str_startswith("B")),
                 "price_val": Column(T.IntegerType()),
@@ -141,11 +157,18 @@ class TestPanderaConfig:
         expected = {
             "validation_enabled": True,
             "validation_depth": ValidationDepth.DATA_ONLY,
+            "cache_dataframe": False,
+            "keep_cached_dataframe": False,
         }
-        assert CONFIG.dict() == expected
 
         input_df = spark_df(spark, self.sample_data, sample_spark_schema)
-        output_dataframeschema_df = pandra_schema.validate(input_df)
+        with config_context(
+            validation_enabled=True,
+            validation_depth=ValidationDepth.DATA_ONLY,
+        ):
+            assert get_config_context().dict() == expected
+            output_dataframeschema_df = pandera_schema.validate(input_df)
+
         expected_dataframeschema = {
             "DATA": {
                 "DATAFRAME_CHECK": [
@@ -177,10 +200,14 @@ class TestPanderaConfig:
         class TestSchema(DataFrameModel):
             """Test Schema"""
 
-            product: T.StringType() = Field(str_startswith="B")
-            price_val: T.StringType() = Field()
+            product: T.StringType = Field(str_startswith="B")
+            price_val: T.StringType = Field()
 
-        output_dataframemodel_df = TestSchema.validate(input_df)
+        with config_context(
+            validation_enabled=True,
+            validation_depth=ValidationDepth.DATA_ONLY,
+        ):
+            output_dataframemodel_df = TestSchema.validate(input_df)
 
         expected_dataframemodel = {
             "DATA": {
@@ -211,13 +238,13 @@ class TestPanderaConfig:
         )
 
     # pylint:disable=too-many-locals
-    def test_schema_and_data(self, spark, sample_spark_schema):
+    def test_schema_and_data(
+        self, spark_session, sample_spark_schema, request
+    ):
         """This function validates that both data and schema level checks are validated"""
+        spark = request.getfixturevalue(spark_session)
         # self.remove_python_module_cache()
-        CONFIG.validation_enabled = True
-        CONFIG.validation_depth = ValidationDepth.SCHEMA_AND_DATA
-
-        pandra_schema = DataFrameSchema(
+        pandera_schema = DataFrameSchema(
             {
                 "product": Column(T.StringType(), Check.str_startswith("B")),
                 "price_val": Column(T.IntegerType()),
@@ -226,11 +253,19 @@ class TestPanderaConfig:
         expected = {
             "validation_enabled": True,
             "validation_depth": ValidationDepth.SCHEMA_AND_DATA,
+            "cache_dataframe": False,
+            "keep_cached_dataframe": False,
         }
-        assert CONFIG.dict() == expected
 
         input_df = spark_df(spark, self.sample_data, sample_spark_schema)
-        output_dataframeschema_df = pandra_schema.validate(input_df)
+
+        with config_context(
+            validation_enabled=True,
+            validation_depth=ValidationDepth.SCHEMA_AND_DATA,
+        ):
+            assert get_config_context().dict() == expected
+            output_dataframeschema_df = pandera_schema.validate(input_df)
+
         expected_dataframeschema = {
             "DATA": {
                 "DATAFRAME_CHECK": [
@@ -257,7 +292,7 @@ class TestPanderaConfig:
                         "'price_val' "
                         "not "
                         "in "
-                        "dataframe\n"
+                        "dataframe "
                         "Row(product='Bread', "
                         "price=9)",
                         "schema": None,
@@ -278,10 +313,14 @@ class TestPanderaConfig:
         class TestSchema(DataFrameModel):
             """Test Schema"""
 
-            product: T.StringType() = Field(str_startswith="B")
-            price_val: T.StringType() = Field()
+            product: T.StringType = Field(str_startswith="B")
+            price_val: T.StringType = Field()
 
-        output_dataframemodel_df = TestSchema.validate(input_df)
+        with config_context(
+            validation_enabled=True,
+            validation_depth=ValidationDepth.SCHEMA_AND_DATA,
+        ):
+            output_dataframemodel_df = TestSchema.validate(input_df)
 
         expected_dataframemodel = {
             "DATA": {
@@ -309,7 +348,7 @@ class TestPanderaConfig:
                         "'price_val' "
                         "not "
                         "in "
-                        "dataframe\n"
+                        "dataframe "
                         "Row(product='Bread', "
                         "price=9)",
                         "schema": "TestSchema",
@@ -326,3 +365,27 @@ class TestPanderaConfig:
             dict(output_dataframemodel_df.pandera.errors["SCHEMA"])
             == expected_dataframemodel["SCHEMA"]
         )
+
+    @pytest.mark.parametrize("cache_dataframe", [True, False])
+    @pytest.mark.parametrize("keep_cached_dataframe", [True, False])
+    # pylint:disable=too-many-locals
+    def test_cache_dataframe_settings(
+        self,
+        cache_dataframe,
+        keep_cached_dataframe,
+        spark_session,  # pylint:disable=unused-argument
+    ):
+        """This function validates setters and getters for cache/keep_cache options."""
+        # Set expected properties in Config object
+        # Evaluate expected Config
+        expected = {
+            "validation_enabled": True,
+            "validation_depth": ValidationDepth.SCHEMA_AND_DATA,
+            "cache_dataframe": cache_dataframe,
+            "keep_cached_dataframe": keep_cached_dataframe,
+        }
+        with config_context(
+            cache_dataframe=cache_dataframe,
+            keep_cached_dataframe=keep_cached_dataframe,
+        ):
+            assert get_config_context().dict() == expected

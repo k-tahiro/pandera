@@ -1,4 +1,5 @@
 """Numpy engine and data types."""
+
 # docstrings are inherited
 # pylint:disable=missing-class-docstring,too-many-ancestors
 import builtins
@@ -48,7 +49,7 @@ class DataType(dtypes.DataType):
         self, data_container: Union[PandasObject, np.ndarray]
     ) -> Union[PandasObject, np.ndarray]:
         """Pure coerce without catching exceptions."""
-        coerced = data_container.astype(self.type)
+        coerced = data_container.astype(str(self.type))
         if type(data_container).__module__.startswith("modin.pandas"):
             # NOTE: this is a hack to enable catching of errors in modin
             coerced.__str__()
@@ -138,17 +139,15 @@ def _build_number_equivalents(
 
     return {
         bit_width: list(
-            set(
-                (
-                    # e.g.: numpy.int64
-                    getattr(np, f"{builtin_name}{bit_width}"),
-                    # e.g.: pandera.dtypes.Int64
-                    getattr(dtypes, f"{pandera_name}{bit_width}"),
-                    getattr(dtypes, f"{pandera_name}{bit_width}")(),
-                    # e.g.: pandera.dtypes.Int(64)
-                    getattr(dtypes, pandera_name)(),
-                )
-            )
+            {
+                # e.g.: numpy.int64
+                getattr(np, f"{builtin_name}{bit_width}"),
+                # e.g.: pandera.dtypes.Int64
+                getattr(dtypes, f"{pandera_name}{bit_width}"),
+                getattr(dtypes, f"{pandera_name}{bit_width}")(),
+                # e.g.: pandera.dtypes.Int(64)
+                getattr(dtypes, pandera_name)(),
+            }
             | set(default_equivalents if bit_width == default_size else [])
         )
         for bit_width in sizes

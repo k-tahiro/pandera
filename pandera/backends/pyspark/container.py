@@ -6,21 +6,21 @@ import warnings
 from typing import Any, Dict, List, Optional
 
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, count
 
-from pandera.api.pyspark.error_handler import ErrorCategory, ErrorHandler
+from pandera.api.base.error_handler import ErrorCategory, ErrorHandler
 from pandera.api.pyspark.types import is_table
 from pandera.backends.pyspark.base import ColumnInfo, PysparkSchemaBackend
-from pandera.backends.pyspark.decorators import ValidationScope, validate_scope
+from pandera.backends.pyspark.decorators import cache_check_obj, validate_scope
 from pandera.backends.pyspark.error_formatters import scalar_failure_case
-from pandera.config import CONFIG
+from pandera.config import get_config_context
 from pandera.errors import (
-    ParserError,
     SchemaDefinitionError,
     SchemaError,
     SchemaErrorReason,
     SchemaErrors,
 )
+from pandera.validation_depth import ValidationScope
 
 
 class DataFrameSchemaBackend(PysparkSchemaBackend):
@@ -31,21 +31,21 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         return check_obj
 
     @validate_scope(scope=ValidationScope.SCHEMA)
-    def _column_checks(
+    def _schema_checks(
         self,
         check_obj: DataFrame,
         schema,
         column_info: ColumnInfo,
         error_handler: ErrorHandler,
     ):
-        """run the checks related to columns presence, uniqueness and filter column if neccesary"""
+        """run the checks related to columns presence, strictness and filter column if neccesary"""
 
         # check the container metadata, e.g. field names
         try:
             self.check_column_names_are_unique(check_obj, schema)
         except SchemaError as exc:
             error_handler.collect_error(
-                type=ErrorCategory.SCHEMA,
+                error_type=ErrorCategory.SCHEMA,
                 reason_code=exc.reason_code,
                 schema_error=exc,
             )
@@ -55,7 +55,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         except SchemaErrors as exc:
             for schema_error in exc.schema_errors:
                 error_handler.collect_error(
-                    type=ErrorCategory.SCHEMA,
+                    error_type=ErrorCategory.SCHEMA,
                     reason_code=schema_error["reason_code"],
                     schema_error=schema_error["error"],
                 )
@@ -67,10 +67,11 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
             )
         except SchemaError as exc:
             error_handler.collect_error(
-                type=ErrorCategory.SCHEMA,
+                error_type=ErrorCategory.SCHEMA,
                 reason_code=exc.reason_code,
                 schema_error=exc,
             )
+
         # try to coerce datatypes
         check_obj = self.coerce_dtype(
             check_obj,
@@ -80,6 +81,29 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
 
         return check_obj
 
+    @validate_scope(scope=ValidationScope.DATA)
+    def _data_checks(
+        self,
+        check_obj: DataFrame,
+        schema,
+        column_info: ColumnInfo,  # pylint: disable=unused-argument
+        error_handler: ErrorHandler,
+    ):
+        """Run the checks related to data validation and uniqueness."""
+
+        # uniqueness of values
+        try:
+            check_obj = self.unique(
+                check_obj, schema=schema, error_handler=error_handler
+            )
+        except SchemaError as err:
+            error_handler.collect_error(
+                ErrorCategory.DATA, err.reason_code, err
+            )
+
+        return check_obj
+
+    @cache_check_obj()
     def validate(
         self,
         check_obj: DataFrame,
@@ -100,7 +124,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         assert (
             error_handler is not None
         ), "The `error_handler` argument must be provided."
-        if not CONFIG.validation_enabled:
+        if not get_config_context().validation_enabled:
             warnings.warn(
                 "Skipping the validation checks as validation is disabled"
             )
@@ -115,8 +139,13 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
             check_obj = check_obj.pandera.add_schema(schema)
         column_info = self.collect_column_info(check_obj, schema, lazy)
 
-        # validate the columns of the dataframe
-        check_obj = self._column_checks(
+        # validate the columns (schema) of the dataframe
+        check_obj = self._schema_checks(
+            check_obj, schema, column_info, error_handler
+        )
+
+        # validate the rows (data) of the dataframe
+        check_obj = self._data_checks(
             check_obj, schema, column_info, error_handler
         )
 
@@ -129,11 +158,15 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         )
         try:
             self.run_schema_component_checks(
-                check_obj_subsample, schema_components, lazy, error_handler
+                check_obj_subsample,
+                schema,
+                schema_components,
+                lazy,
+                error_handler,
             )
         except SchemaError as exc:
             error_handler.collect_error(
-                type=ErrorCategory.SCHEMA,
+                error_type=ErrorCategory.SCHEMA,
                 reason_code=exc.reason_code,
                 schema_error=exc,
             )
@@ -141,7 +174,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
             self.run_checks(check_obj_subsample, schema, error_handler)
         except SchemaError as exc:
             error_handler.collect_error(
-                type=ErrorCategory.DATA,
+                error_type=ErrorCategory.DATA,
                 reason_code=exc.reason_code,
                 schema_error=exc,
             )
@@ -149,7 +182,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         error_dicts = {}
 
         if error_handler.collected_errors:
-            error_dicts = error_handler.summarize(schema=schema)
+            error_dicts = error_handler.summarize(schema_name=schema.name)
 
         check_obj.pandera.errors = error_dicts
         return check_obj
@@ -157,6 +190,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
     def run_schema_component_checks(
         self,
         check_obj: DataFrame,
+        schema,
         schema_components: List,
         lazy: bool,
         error_handler: Optional[ErrorHandler],
@@ -191,14 +225,14 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         check_results = []
         for check_index, check in enumerate(
             schema.checks
-        ):  # schama.checks is null
+        ):  # schema.checks is null
             try:
                 check_results.append(
                     self.run_check(check_obj, schema, check, check_index)
                 )
             except SchemaError as err:
                 error_handler.collect_error(
-                    ErrorCategory.DATA, err.reason_code, err
+                    ErrorCategory.DATA, SchemaErrorReason.DATAFRAME_CHECK, err
                 )
             except SchemaDefinitionError:
                 raise
@@ -252,8 +286,8 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
             if col_schema.regex:
                 try:
                     column_names.extend(
-                        col_schema.BACKEND.get_regex_columns(
-                            col_schema, check_obj.columns
+                        col_schema.get_backend(check_obj).get_regex_columns(
+                            col_schema, check_obj
                         )
                     )
                 except SchemaError:
@@ -283,7 +317,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         schema_components = []
         for col_name, column in schema.columns.items():
             if (
-                column.required or col_name in check_obj
+                column.required or col_name in check_obj.columns
             ) and col_name not in column_info.lazy_exclude_column_names:
                 column = copy.deepcopy(column)
                 if schema.dtype is not None:
@@ -386,8 +420,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         except SchemaErrors as err:
             for schema_error_dict in err.schema_errors:
                 if not error_handler.lazy:
-                    # raise the first error immediately if not doing lazy
-                    # validation
+                    # raise the first error immediately if not doing lazy validation
                     raise schema_error_dict["error"]
                 error_handler.collect_error(
                     ErrorCategory.DTYPE_COERCION,
@@ -417,27 +450,6 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         # NOTE: clean up the error handling!
         error_handler = ErrorHandler(lazy=True)
 
-        def _coerce_df_dtype(obj: DataFrame) -> DataFrame:
-            if schema.dtype is None:
-                raise ValueError(
-                    "dtype argument is None. Must specify this argument "
-                    "to coerce dtype"
-                )
-
-            try:
-                return schema.dtype.try_coerce(obj)
-            except ParserError as exc:
-                raise SchemaError(
-                    schema=schema,
-                    data=obj,
-                    message=(
-                        f"Error while coercing '{schema.name}' to type "
-                        f"{schema.dtype}: {exc}\n{exc.failure_cases}"
-                    ),
-                    failure_cases=exc.failure_cases,
-                    check=f"coerce_dtype('{schema.dtype}')",
-                ) from exc
-
         def _try_coercion(obj, colname, col_schema):
             try:
                 schema = obj.pandera.schema
@@ -457,9 +469,9 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         for colname, col_schema in schema.columns.items():
             if col_schema.regex:
                 try:
-                    matched_columns = col_schema.BACKEND.get_regex_columns(
-                        col_schema, obj.columns
-                    )
+                    matched_columns = col_schema.get_backend(
+                        obj
+                    ).get_regex_columns(col_schema, obj.columns)
                 except SchemaError:
                     matched_columns = None
 
@@ -468,7 +480,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
                         obj = _try_coercion(
                             obj,
                             matched_colname,
-                            col_schema
+                            col_schema,
                             # col_schema.coerce_dtype, obj[matched_colname]
                         )
 
@@ -484,11 +496,67 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
         if error_handler.collected_errors:
             raise SchemaErrors(
                 schema=schema,
-                schema_errors=error_handler.collected_errors,
+                schema_errors=error_handler.collected_errors,  # type: ignore
                 data=obj,
             )
 
         return obj
+
+    @validate_scope(scope=ValidationScope.DATA)
+    def unique(
+        self,
+        check_obj: DataFrame,
+        *,
+        schema=None,
+        error_handler: ErrorHandler = None,
+    ):
+        """Check uniqueness in the check object."""
+        assert schema is not None, "The `schema` argument must be provided."
+        assert (
+            error_handler is not None
+        ), "The `error_handler` argument must be provided."
+
+        if not schema.unique:
+            return check_obj
+
+        # Determine unique columns based on schema's config
+        unique_columns = (
+            [schema.unique]
+            if isinstance(schema.unique, str)
+            else schema.unique
+        )
+
+        # Check if values belong to the dataframe columns
+        missing_unique_columns = set(unique_columns) - set(check_obj.columns)
+        if missing_unique_columns:
+            raise SchemaDefinitionError(
+                "Specified `unique` columns are missing in the dataframe: "
+                f"{list(missing_unique_columns)}"
+            )
+
+        duplicates_count = (
+            check_obj.select(*unique_columns)  # ignore other cols
+            .groupby(*unique_columns)
+            .agg(count("*").alias("pandera_duplicate_counts"))
+            .filter(
+                col("pandera_duplicate_counts") > 1
+            )  # long name to avoid colisions
+            .count()
+        )
+
+        if duplicates_count > 0:
+            raise SchemaError(
+                schema=schema,
+                data=check_obj,
+                message=(
+                    f"Duplicated rows [{duplicates_count}] were found "
+                    f"for columns {unique_columns}"
+                ),
+                check="unique",
+                reason_code=SchemaErrorReason.DUPLICATES,
+            )
+
+        return check_obj
 
     ##########
     # Checks #
@@ -516,8 +584,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
                 schema=schema,
                 data=check_obj,
                 message=(
-                    "dataframe contains multiple columns with label(s): "
-                    f"{failed}"
+                    f"dataframe contains multiple columns with label(s): {failed}"
                 ),
                 failure_cases=scalar_failure_case(failed),
                 check="dataframe_column_labels_unique",
@@ -533,7 +600,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
             reason_code = SchemaErrorReason.COLUMN_NOT_IN_DATAFRAME
             raise SchemaErrors(
                 schema=schema,
-                schema_errors=[
+                schema_errors=[  # type: ignore
                     {
                         "reason_code": reason_code,
                         "error": SchemaError(
@@ -541,7 +608,7 @@ class DataFrameSchemaBackend(PysparkSchemaBackend):
                             data=check_obj,
                             message=(
                                 f"column '{colname}' not in dataframe"
-                                f"\n{check_obj.head()}"
+                                f" {check_obj.head()}"
                             ),
                             failure_cases=scalar_failure_case(colname),
                             check="column_in_dataframe",

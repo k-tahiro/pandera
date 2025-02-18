@@ -13,9 +13,10 @@ target-version = [
   'py38',
   'py39',
   'py310',
-  # 'py311' Disabled until black>=23.7.0
+  'py311',
+  'py312',
 ]
-include = '^(\.py)|(\.pyi)$'
+include = '\.pyi?$'
 exclude = '''
 (
   \.git

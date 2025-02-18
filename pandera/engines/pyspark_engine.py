@@ -1,4 +1,5 @@
 """PySpark engine and data types."""
+
 # pylint:disable=too-many-ancestors,no-member
 
 # docstrings are inherited
@@ -10,27 +11,27 @@
 import dataclasses
 import inspect
 import re
-import warnings
-from typing import Any, Iterable, Union, Optional
 import sys
+import warnings
+from typing import Any, Iterable, Optional, Union
 
+import pyspark
 import pyspark.sql.types as pst
+from pyspark.sql import DataFrame
+from packaging import version
 
 from pandera import dtypes, errors
 from pandera.dtypes import immutable
 from pandera.engines import engine
-from pandera.engines.type_aliases import PysparkObject
 
-try:
-    import pyarrow  # pylint:disable=unused-import
 
-    PYARROW_INSTALLED = True
-except ImportError:  # pragma: no cover
-    PYARROW_INSTALLED = False
+PysparkObject = Union[DataFrame]
 
 
 DEFAULT_PYSPARK_PREC = pst.DecimalType().precision
 DEFAULT_PYSPARK_SCALE = pst.DecimalType().scale
+
+CURRENT_PYSPARK_VERSION = version.parse(pyspark.__version__)
 
 
 @immutable(init=True)
@@ -341,10 +342,15 @@ class Date(DataType, dtypes.Date):  # type: ignore
 # timestamp
 ###############################################################################
 
+# Default timestamp equivalents
+equivalents = ["datetime", "timestamp", "TimestampType", "TimestampType()", pst.TimestampType(), pst.TimestampType]  # type: ignore
 
-@Engine.register_dtype(
-    equivalents=["datetime", "timestamp", "TimestampType", "TimestampType()", pst.TimestampType(), pst.TimestampType],  # type: ignore
-)
+# Include new Spark 3.4 TimestampNTZType as equivalents
+if CURRENT_PYSPARK_VERSION >= version.parse("3.4"):
+    equivalents += ["TimestampNTZType", "TimestampNTZType()", pst.TimestampNTZType, pst.TimestampNTZType()]  # type: ignore
+
+
+@Engine.register_dtype(equivalents=equivalents)  # type: ignore
 @immutable
 class Timestamp(DataType, dtypes.Timestamp):  # type: ignore
     """Semantic representation of a :class:`pyspark.sql.types.TimestampType`."""

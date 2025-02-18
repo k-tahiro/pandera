@@ -17,7 +17,7 @@ from typing import (
 )
 
 import pandas as pd
-from multimethod import multidispatch as _multidispatch
+from pandera.api.function_dispatch import Dispatcher
 
 from pandera.backends.base import BaseCheckBackend
 
@@ -26,7 +26,7 @@ class CheckResult(NamedTuple):
     """Check result for user-defined checks."""
 
     check_output: Any
-    check_passed: bool
+    check_passed: Any
     checked_object: Any
     failure_cases: Any
 
@@ -43,52 +43,15 @@ DataFrameCheckObj = Union[pd.DataFrame, Dict[str, pd.DataFrame]]
 _T = TypeVar("_T", bound="BaseCheck")
 
 
-# pylint: disable=invalid-name
-class multidispatch(_multidispatch):
-    """
-    Custom multidispatch class to handle copy, deepcopy, and code retrieval.
-    """
-
-    @property
-    def __code__(self):
-        """Retrieves the 'base' function of the multidispatch object."""
-        assert (
-            len(self) > 0
-        ), f"multidispatch object {self} has no functions registered"
-        fn, *_ = [*self.values()]  # type: ignore[misc]
-        return fn.__code__
-
-    def __reduce__(self):
-        """
-        Handle custom pickling reduction method by initializing a new
-        multidispatch object, wrapped with the base function.
-        """
-        state = self.__dict__
-        # make sure all registered functions at time of pickling are captured
-        state["__registered_functions__"] = [*self.values()]
-        return (
-            multidispatch,  # object creation function
-            (state["__wrapped__"],),  # arguments to said function
-            state,  # arguments to `__setstate__` after creation
-        )
-
-    def __setstate__(self, state):
-        """Custom unpickling logic."""
-        self.__dict__ = state
-        # rehydrate the multidispatch object with unpickled registered functions
-        for fn in state["__registered_functions__"]:
-            self.register(fn)
-
-
 class MetaCheck(type):  # pragma: no cover
     """Check metaclass."""
 
-    BACKEND_REGISTRY: Dict[
-        Tuple[Type, Type], Type[BaseCheckBackend]
-    ] = {}  # noqa
+    BACKEND_REGISTRY: Dict[Tuple[Type, Type], Type[BaseCheckBackend]] = (
+        {}
+    )  # noqa
     """Registry of check backends implemented for specific data objects."""
 
-    CHECK_FUNCTION_REGISTRY: Dict[str, Callable] = {}  # noqa
+    CHECK_FUNCTION_REGISTRY: Dict[str, Dispatcher] = {}  # noqa
     """Built-in check function registry."""
 
     REGISTERED_CUSTOM_CHECKS: Dict[str, Callable] = {}  # noqa
@@ -148,7 +111,13 @@ class BaseCheck(metaclass=MetaCheck):
     @classmethod
     def register_builtin_check_fn(cls, fn: Callable):
         """Registers a built-in check function"""
-        cls.CHECK_FUNCTION_REGISTRY[fn.__name__] = multidispatch(fn)
+        if fn.__name__ in cls.CHECK_FUNCTION_REGISTRY:
+            dispatcher = cls.CHECK_FUNCTION_REGISTRY[fn.__name__]
+        else:
+            dispatcher = Dispatcher()
+            cls.CHECK_FUNCTION_REGISTRY[fn.__name__] = dispatcher
+
+        dispatcher.register(fn)
         return fn
 
     @classmethod
@@ -157,12 +126,17 @@ class BaseCheck(metaclass=MetaCheck):
         return cls.CHECK_FUNCTION_REGISTRY[name]
 
     @classmethod
+    def is_builtin_check(cls, name: str) -> bool:
+        """Gets a built-in check function"""
+        return name in cls.CHECK_FUNCTION_REGISTRY
+
+    @classmethod
     def from_builtin_check_name(
         cls,
         name: str,
         init_kwargs,
         error: Union[str, Callable],
-        statistics: Dict[str, Any] = None,
+        statistics: Optional[Dict[str, Any]] = None,
         **check_kwargs,
     ):
         """Create a Check object from a built-in check's name."""
@@ -174,6 +148,7 @@ class BaseCheck(metaclass=MetaCheck):
         # by the check object
         if statistics is None:
             statistics = check_kwargs
+
         return cls(
             cls.get_builtin_check_fn(name),
             statistics=statistics,
@@ -183,7 +158,8 @@ class BaseCheck(metaclass=MetaCheck):
     @classmethod
     def register_backend(cls, type_: Type, backend: Type[BaseCheckBackend]):
         """Register a backend for the specified type."""
-        cls.BACKEND_REGISTRY[(cls, type_)] = backend
+        if (cls, type_) not in cls.BACKEND_REGISTRY:
+            cls.BACKEND_REGISTRY[(cls, type_)] = backend
 
     @classmethod
     def get_backend(cls, check_obj: Any) -> Type[BaseCheckBackend]:
@@ -236,12 +212,13 @@ class BaseCheck(metaclass=MetaCheck):
 
     def _get_check_fn_code(self):
         check_fn = self.__dict__["_check_fn"]
+        if isinstance(check_fn, Dispatcher):
+            return check_fn.co_code
         try:
             code = check_fn.__code__.co_code
         except AttributeError:
             # try accessing the functools.partial wrapper
             code = check_fn.func.__code__.co_code
-
         return code
 
     def __hash__(self) -> int:

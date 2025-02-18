@@ -6,6 +6,7 @@
 
 # -- Path setup --------------------------------------------------------------
 
+import datetime
 import doctest
 import inspect
 import logging as pylogging
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 
+import sphinx.application
 from sphinx.util import logging
 
 import pandera
@@ -28,9 +30,10 @@ sys.path.insert(0, os.path.abspath("../.."))
 
 # -- Project information -----------------------------------------------------
 
+_year = datetime.datetime.now().year
 project = "pandera"
-copyright = "2019, Niels Bantilan, Nigel Markey, Jean-Francois Zinque"
-author = "Niels Bantilan, Nigel Markey, Jean-Francois Zinque"
+author = "Pandera developers"
+copyright = f"{_year}, {author}"
 
 
 # -- General configuration ---------------------------------------------------
@@ -46,9 +49,8 @@ extensions = [
     "sphinx_autodoc_typehints",
     "sphinx.ext.linkcode",  # link to github, see linkcode_resolve() below
     "sphinx_copybutton",
-    "recommonmark",
-    "sphinx_panels",
-    "jupyterlite_sphinx",
+    "sphinx_design",
+    "myst_nb",
 ]
 
 doctest_global_setup = """
@@ -75,7 +77,7 @@ PANDAS_GT_V2 = version.parse(pd.__version__).release >= (2, 0)
 SKIP_PANDAS_LT_V1 = PANDAS_LT_V2 or PY36
 SKIP_PANDAS_LT_V1_OR_GT_V2 = PANDAS_LT_V2 or PANDAS_GT_V2 or PY36
 SKIP_SCALING = True
-SKIP_SCHEMA_MODEL = SKIP_PANDAS_LT_V1
+SKIP_SCHEMA_MODEL = SKIP_PANDAS_LT_V1_OR_GT_V2
 SKIP_MODIN = True
 
 """
@@ -90,7 +92,7 @@ doctest_default_flags = (
 
 source_suffix = {
     ".rst": "restructuredtext",
-    ".md": "markdown",
+    ".md": "myst-nb",
 }
 
 # copy CONTRIBUTING.md docs into source directory
@@ -132,7 +134,7 @@ html_theme = "furo"
 # documentation.
 
 announcement = """
-📢 Pandera 0.16.0 now supports <a href="pyspark_sql.html">Pyspark SQL</a> 🎉.
+📢 Pandera 0.19.0 now supports <a href="polars.html">Polars</a> 🎉.
 If you like this project, <a href='https://github.com/unionai-oss/pandera' target='_blank'>give us a star ⭐️! </a>
 """
 
@@ -164,17 +166,18 @@ html_theme_options = {
 html_static_path = ["_static"]
 
 html_css_files = [
-    "default.css",
     "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css",
+    "https://cdn.jsdelivr.net/npm/@docsearch/css@3",
+    "default.css",
+]
+html_js_files = [
+    "custom.js",
+    "https://cdn.jsdelivr.net/npm/@docsearch/js@3",
+    "docsearch_config.js",
 ]
 
-
-rst_prolog = """
-.. role:: red
-.. role:: green
-"""
-
 autosummary_generate = True
+autosummary_generate_overwrite = False
 autosummary_filename_map = {
     "pandera.Check": "pandera.Check",
     "pandera.check": "pandera.check_decorator",
@@ -187,6 +190,8 @@ intersphinx_mapping = {
     "dask": ("https://docs.dask.org/en/latest/", None),
     "pyspark": ("https://spark.apache.org/docs/latest/api/python/", None),
     "modin": ("https://modin.readthedocs.io/en/latest/", None),
+    "polars": ("https://docs.pola.rs/py-polars/html/", None),
+    "typeguard": ("https://typeguard.readthedocs.io/en/stable/", None),
 }
 
 # strip prompts
@@ -198,7 +203,7 @@ copybutton_prompt_is_regexp = True
 
 # this is a workaround to filter out forward reference issue in
 # sphinx_autodoc_typehints
-class FilterPandasTypeAnnotationWarning(pylogging.Filter):
+class FilterTypeAnnotationWarnings(pylogging.Filter):
     def filter(self, record: pylogging.LogRecord) -> bool:
         # You probably should make this check more specific by checking
         # that dataclass name is in the message, so that you don't filter out
@@ -208,19 +213,48 @@ class FilterPandasTypeAnnotationWarning(pylogging.Filter):
             # correctly
             record.getMessage().startswith(
                 (
+                    "Cannot resolve forward reference in type annotations",
                     "Cannot resolve forward reference in type annotations of "
                     '"pandera.typing.DataFrame"',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.DataFrame',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.Index',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.Series',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.geopandas.GeoDataFrame',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.geopandas.GeoSeries',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.pyspark.DataFrame',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.pyspark.Series',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.pyspark.Index',
                     "Cannot resolve forward reference in type annotations of "
                     '"pandera.api.pandas.container.DataFrameSchema',
                     "Cannot resolve forward reference in type annotations of "
                     '"pandera.typing.DataFrame.style"',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.api.polars.container.DataFrameSchema',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.api.pyspark.container.DataFrameSchema',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.Series"',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.modin.DataFrame',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.modin.Series',
+                    "Cannot resolve forward reference in type annotations of "
+                    '"pandera.typing.modin.Index',
                 )
             )
         )
 
 
 logging.getLogger("sphinx_autodoc_typehints").logger.addFilter(
-    FilterPandasTypeAnnotationWarning()
+    FilterTypeAnnotationWarnings()
 )
 
 
@@ -276,6 +310,108 @@ def linkcode_resolve(domain, info):
     return f"https://github.com/pandera-dev/pandera/blob/{tag}/pandera/{fn}{linespec}"
 
 
-# jupyterlite config
-jupyterlite_contents = ["notebooks/try_pandera.ipynb"]
-jupyterlite_bind_ipynb_suffix = False
+# myst-nb configuration
+myst_enable_extensions = [
+    "colon_fence",
+]
+myst_heading_anchors = 3
+
+nb_execution_mode = os.getenv("PANDERA_DOCS_NB_EXECUTION_MODE", "auto")
+nb_execution_timeout = 60
+nb_execution_excludepatterns = ["_contents/try_pandera.ipynb"]
+
+# docsearch configuration
+docsearch_container = "#docsearch"
+docsearch_app_id = os.getenv("DOCSEARCH_SEARCH_APP_ID", "GA9NROLUXR")
+docsearch_api_key = os.getenv("DOCSEARCH_SEARCH_API_KEY")
+docsearch_index_name = os.getenv("DOCSEARCH_INDEX_NAME", "pandera")
+docsearch_search_parameters = {
+    "facetFilters": [f"version:{os.getenv('READTHEDOCS_VERSION', 'stable')}"]
+}
+
+
+class CustomWarningSuppressor(pylogging.Filter):
+    """Filter logs by `suppress_warnings`."""
+
+    def __init__(self, app: sphinx.application.Sphinx) -> None:
+        self.app = app
+        super().__init__()
+
+    def filter(self, record: pylogging.LogRecord) -> bool:
+        msg = record.getMessage()
+
+        # TODO: These are all warnings that should be fixed as follow-ups to the
+        # monodocs build project.
+        filter_out = (
+            "Definition list ends without a blank line; unexpected unindent",
+            "Unexpected indentation",
+            "Block quote ends without a blank line; unexpected unindent",
+        )
+
+        if msg.strip().startswith(filter_out):
+            return False
+
+        if (
+            msg.strip().startswith("document isn't included in any toctree")
+            and record.location == "_tags/tagsindex"
+        ):
+            # ignore this warning, since we don't want the side nav to be
+            # cluttered with the tags index page.
+            return False
+
+        return True
+
+
+def add_warning_suppressor(app: sphinx.application.Sphinx) -> None:
+    logger = pylogging.getLogger("sphinx")
+    warning_handler, *_ = (
+        h
+        for h in logger.handlers
+        if isinstance(h, logging.WarningStreamHandler)
+    )
+    warning_handler.filters.insert(0, CustomWarningSuppressor(app))
+
+
+def add_docsearch_config(app: sphinx.application.Sphinx) -> None:
+    app.add_config_value(
+        "docsearch_app_id", default="", rebuild="html", types=[str]
+    )
+    app.add_config_value(
+        "docsearch_api_key", default="", rebuild="html", types=[str]
+    )
+    app.add_config_value(
+        "docsearch_index_name", default="", rebuild="html", types=[str]
+    )
+    app.add_config_value(
+        "docsearch_container",
+        default="#docsearch",
+        rebuild="html",
+        types=[str],
+    )
+    app.add_config_value(
+        "docsearch_search_parameters", default="", rebuild="html", types=[dict]
+    )
+
+
+def add_docsearch_assets(
+    app: sphinx.application.Sphinx, config: sphinx.application.Config
+):
+    app.add_js_file("docsearch_config.js", loading_method="defer")
+
+    # Update global context
+    config.html_context.update(
+        {
+            "docsearch_app_id": config.docsearch_app_id,
+            "docsearch_api_key": app.config.docsearch_api_key,
+            "docsearch_index_name": app.config.docsearch_index_name,
+            "docsearch_container": app.config.docsearch_container,
+            "docsearch_search_parameters": app.config.docsearch_search_parameters,
+        }
+    )
+
+
+def setup(app: sphinx.application.Sphinx) -> None:
+    add_warning_suppressor(app)
+    add_docsearch_config(app)
+
+    app.connect("config-inited", add_docsearch_assets)

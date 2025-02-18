@@ -32,6 +32,12 @@ class InSchemaDict(InSchema):
         from_format = "dict"
 
 
+class InSchemaDictKwargs(InSchema):
+    class Config:
+        from_format = "dict"
+        from_format_kwargs = {"orient": "index"}
+
+
 class InSchemaJson(InSchema):
     class Config:
         from_format = "json"
@@ -56,6 +62,11 @@ class InSchemaPickle(InSchema):
 class InSchemaPickleCallable(InSchema):
     class Config:
         from_format = pd.read_pickle
+
+
+class InSchemaJsonNormalize(InSchema):
+    class Config:
+        from_format = "json_normalize"
 
 
 class OutSchema(InSchema):
@@ -177,6 +188,7 @@ def _needs_pyarrow(schema) -> bool:
             io.StringIO,
         ],
         [InSchemaDict, lambda df: df.to_dict(orient="records"), None],
+        [InSchemaDictKwargs, lambda df: df.to_dict(orient="index"), None],
         [
             InSchemaJson,
             lambda df, x: df.to_json(x, orient="records"),
@@ -187,6 +199,7 @@ def _needs_pyarrow(schema) -> bool:
         [InSchemaParquet, lambda df, x: df.to_parquet(x), io.BytesIO],
         [InSchemaPickle, lambda df, x: df.to_pickle(x), io.BytesIO],
         [InSchemaPickleCallable, lambda df, x: df.to_pickle(x), io.BytesIO],
+        [InSchemaJsonNormalize, lambda df: df.to_dict(orient="records"), None],
     ],
 )
 def test_from_format(schema, to_fn, buf_cls):
@@ -272,13 +285,13 @@ def test_to_format(schema, from_fn, buf_cls):
     df = mock_dataframe()
 
     if _needs_pyarrow(schema):
-        with pytest.raises((ImportError)):
+        with pytest.raises(ImportError):
             fn(df)
         return
 
     try:
         out = fn(df)
-    except IOError:
+    except OSError:
         pytest.skip(
             f"pandas=={pd.__version__} automatically closes the buffer, for "
             "more details see: "

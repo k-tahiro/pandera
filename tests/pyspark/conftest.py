@@ -1,9 +1,13 @@
 """ conftest """
+
 # pylint:disable=redefined-outer-name
 import datetime
+import os
+
+import pyspark.sql.types as T
 import pytest
 from pyspark.sql import SparkSession
-import pyspark.sql.types as T
+
 from pandera.config import PanderaConfig
 
 
@@ -12,7 +16,21 @@ def spark() -> SparkSession:
     """
     creates spark session
     """
-    return SparkSession.builder.getOrCreate()
+    spark: SparkSession = SparkSession.builder.getOrCreate()
+    yield spark
+    spark.stop()
+
+
+@pytest.fixture(scope="session")
+def spark_connect() -> SparkSession:
+    """
+    creates spark connection session
+    """
+    # Set location of localhost Spark Connect server
+    os.environ["SPARK_LOCAL_REMOTE"] = "sc://localhost"
+    spark: SparkSession = SparkSession.builder.getOrCreate()
+    yield spark
+    spark.stop()
 
 
 @pytest.fixture(scope="session")

@@ -7,7 +7,7 @@ try:
     # python 3.8+
     from typing import Literal  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover
-    from typing_extensions import Literal  # type: ignore[misc]
+    from typing_extensions import Literal  # type: ignore[assignment]
 
 
 class Formats(Enum):
@@ -42,6 +42,9 @@ class Formats(Enum):
     #: python pickle file format
     pickle = "pickle"
 
+    #: python json_normalize
+    json_normalize = "json_normalize"
+
 
 Format = Union[
     Literal[Formats.csv],
@@ -50,4 +53,5 @@ Format = Union[
     Literal[Formats.feather],
     Literal[Formats.parquet],
     Literal[Formats.pickle],
+    Literal[Formats.json_normalize],
 ]

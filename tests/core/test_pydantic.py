@@ -1,4 +1,5 @@
 """Unit tests for pydantic compatibility."""
+
 # pylint:disable=too-few-public-methods,missing-class-docstring
 from typing import Optional
 
@@ -6,8 +7,8 @@ import pandas as pd
 import pytest
 
 import pandera as pa
+from pandera.engines import pydantic_version
 from pandera.typing import DataFrame, Series
-from pandera.engines.utils import pydantic_version
 
 try:
     from pydantic import BaseModel, ValidationError
@@ -64,7 +65,7 @@ def test_typed_dataframe():
 
 
 def test_invalid_typed_dataframe():
-    """Test that an invalid typed DataFrame is recognized by pydantic."""
+    """Test that an invalid typed DataFrame is recognized by pandera."""
     with pytest.raises(ValidationError):
         TypedDfPydantic(df=1)
 
@@ -73,10 +74,13 @@ def test_invalid_typed_dataframe():
 
         str_col = pa.Field(unique=True)  # omit annotation
 
-    class PydanticModel(BaseModel):
-        pa_schema: DataFrame[InvalidSchema]
+    with pytest.raises(pa.errors.SchemaInitError):
 
-    with pytest.raises(ValueError):
+        class PydanticModel(BaseModel):
+            pa_schema: DataFrame[InvalidSchema]
+
+    # This check prevents Linters from raising an error about not using the PydanticModel class
+    with pytest.raises(UnboundLocalError):
         PydanticModel(pa_schema=InvalidSchema)
 
 

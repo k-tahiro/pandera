@@ -3,16 +3,16 @@
 import traceback
 from typing import Iterable, NamedTuple, Optional, cast
 
-from multimethod import DispatchError
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
 
-from pandera.api.pyspark.error_handler import ErrorCategory, ErrorHandler
+from pandera.api.base.error_handler import ErrorCategory, ErrorHandler
 from pandera.backends.pyspark.base import PysparkSchemaBackend
-from pandera.backends.pyspark.decorators import validate_scope, ValidationScope
+from pandera.backends.pyspark.decorators import validate_scope
 from pandera.backends.pyspark.error_formatters import scalar_failure_case
 from pandera.engines.pyspark_engine import Engine
 from pandera.errors import ParserError, SchemaError, SchemaErrorReason
+from pandera.validation_depth import ValidationScope
 
 
 class CoreCheckResult(NamedTuple):
@@ -125,10 +125,18 @@ class ColumnSchemaBackend(PysparkSchemaBackend):
 
     @validate_scope(scope=ValidationScope.SCHEMA)
     def check_nullable(self, check_obj: DataFrame, schema):
-        isna = (
-            check_obj.filter(col(schema.name).isNull()).limit(1).count() == 0
-        )
-        passed = schema.nullable or isna
+        passed = True
+
+        # Use schema level information to optimize execution of the `nullable` check:
+        # ignore this check if Pandera Field's `nullable` property is True
+        # (check not necessary) or if df column's `nullable` property is False
+        # (PySpark's nullable ensures the presence of values when creating the df)
+        if (not schema.nullable) and (check_obj.schema[schema.name].nullable):
+            passed = (
+                check_obj.filter(col(schema.name).isNull()).limit(1).count()
+                == 0
+            )
+
         return CoreCheckResult(
             check="not_nullable",
             reason_code=SchemaErrorReason.SERIES_CONTAINS_NULLS,
@@ -144,9 +152,11 @@ class ColumnSchemaBackend(PysparkSchemaBackend):
         )
         return CoreCheckResult(
             check=f"field_name('{schema.name}')",
-            reason_code=SchemaErrorReason.WRONG_FIELD_NAME
-            if not column_found
-            else SchemaErrorReason.NO_ERROR,
+            reason_code=(
+                SchemaErrorReason.WRONG_FIELD_NAME
+                if not column_found
+                else SchemaErrorReason.NO_ERROR
+            ),
             passed=column_found,
             message=(
                 f"Expected {type(check_obj)} to have column named: '{schema.name}', "
@@ -154,9 +164,9 @@ class ColumnSchemaBackend(PysparkSchemaBackend):
                 if not column_found
                 else "column check_name validation passed."
             ),
-            failure_cases=scalar_failure_case(schema.name)
-            if not column_found
-            else None,
+            failure_cases=(
+                scalar_failure_case(schema.name) if not column_found else None
+            ),
         )
 
     @validate_scope(scope=ValidationScope.SCHEMA)
@@ -193,7 +203,7 @@ class ColumnSchemaBackend(PysparkSchemaBackend):
 
         return CoreCheckResult(
             check=f"dtype('{schema.dtype}')",
-            reason_code=reason_code,
+            reason_code=reason_code,  # pylint:disable=possibly-used-before-assignment
             passed=passed,
             message=msg,
             failure_cases=failure_cases,
@@ -223,11 +233,6 @@ class ColumnSchemaBackend(PysparkSchemaBackend):
                 )
             except Exception as err:  # pylint: disable=broad-except
                 # catch other exceptions that may occur when executing the Check
-                if isinstance(err, DispatchError):
-                    # if the error was raised by a check registered via
-                    # multimethod, get the underlying __cause__
-                    err = err.__cause__
-
                 err_msg = f'"{err.args[0]}"' if len(err.args) > 0 else ""
                 err_str = f"{err.__class__.__name__}({ err_msg})"
                 error_handler.collect_error(

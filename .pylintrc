@@ -15,7 +15,6 @@ good-names=
     v,
     fp,
     bar,
-    _IS_INFERRED,
     eq,
     ne,
     gt,
@@ -48,4 +47,14 @@ disable=
     unnecessary-dunder-call,
     use-dict-literal,
     invalid-name,
-    import-outside-toplevel
+    import-outside-toplevel,
+    missing-class-docstring,
+    missing-function-docstring,
+    fixme,
+    too-many-locals,
+    redefined-outer-name,
+    logging-fstring-interpolation,
+    multiple-statements,
+    cyclic-import,
+    # Due to custom `immutable` decorator replacing `dataclasses.dataclass`
+    invalid-field-call

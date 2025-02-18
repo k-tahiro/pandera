@@ -1,7 +1,9 @@
 """Tests a variety of python and pandas dtypes, and tests some specific
 coercion examples."""
+
 # pylint doesn't know about __init__ generated with dataclass
 # pylint:disable=unexpected-keyword-arg,no-value-for-parameter
+# pylint:disable=unsubscriptable-object
 import dataclasses
 import datetime
 import inspect
@@ -28,7 +30,6 @@ from pandera.system import FLOAT_128_AVAILABLE
 # except for parameterizable dtypes that should also list examples of
 # instances.
 from pandera.typing.geopandas import GEOPANDAS_INSTALLED
-
 
 # register different TypedDict type depending on python version
 if sys.version_info >= (3, 12):
@@ -203,7 +204,7 @@ if GEOPANDAS_INSTALLED:
     from shapely.geometry import Polygon
 
     # pylint:disable=ungrouped-imports
-    from pandera.engines.pandas_engine import Geometry
+    from pandera.engines.geopandas_engine import Geometry
 
     geometry_dtypes = {Geometry: "geometry"}
     dtype_fixtures.append(
@@ -216,9 +217,11 @@ def pretty_param(*values: Any, **kw: Any) -> ParameterSet:
     id_ = kw.pop("id", None)
     if not id_:
         id_ = "-".join(
-            f"{val.__module__}.{val.__name__}"
-            if inspect.isclass(val)
-            else repr(val)
+            (
+                f"{val.__module__}.{val.__name__}"
+                if inspect.isclass(val)
+                else repr(val)
+            )
             for val in values
         )
     return pytest.param(*values, id=id_, **kw)
@@ -308,6 +311,12 @@ def test_invalid_pandas_extension_dtype():
 
 def test_check_equivalent(dtype: Any, pd_dtype: Any):
     """Test that a pandas-compatible dtype can be validated by check()."""
+    if (
+        pandas_engine.PYARROW_INSTALLED
+        and pandas_engine.PANDAS_2_0_0_PLUS
+        and dtype == "string[pyarrow]"
+    ):
+        pytest.skip("`string[pyarrow]` gets parsed to type `string` by pandas")
     actual_dtype = pandas_engine.Engine.dtype(pd_dtype)
     expected_dtype = pandas_engine.Engine.dtype(dtype)
     assert actual_dtype.check(expected_dtype)
@@ -740,22 +749,202 @@ def test_python_typing_dtypes():
 
     schema = pa.DataFrameSchema(
         {
-            "dict_column": pa.Column(Dict[str, int]),
-            "list_column": pa.Column(List[float]),
-            "tuple_column": pa.Column(Tuple[int, str, float]),
+            "Dict_column": pa.Column(Dict[str, int]),
+            "List_column": pa.Column(List[float]),
+            "Tuple_column": pa.Column(Tuple[int, str, float]),
             "typeddict_column": pa.Column(PointDict),
             "namedtuple_column": pa.Column(PointTuple),
         },
     )
 
+    class Model(pa.DataFrameModel):
+        Dict_column: Dict[str, int]
+        List_column: List[float]
+        Tuple_column: Tuple[int, str, float]
+        typeddict_column: PointDict
+        namedtuple_column: PointTuple
+
     data = pd.DataFrame(
         {
-            "dict_column": [{"foo": 1, "bar": 2}],
-            "list_column": [[1.0]],
-            "tuple_column": [(1, "bar", 1.0)],
+            "Dict_column": [{"foo": 1, "bar": 2}],
+            "List_column": [[1.0]],
+            "Tuple_column": [(1, "bar", 1.0)],
             "typeddict_column": [PointDict(x=2.1, y=4.8)],
             "namedtuple_column": [PointTuple(x=9.2, y=1.6)],
         }
     )
 
     schema.validate(data)
+    Model.validate(data)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 9),
+    reason="standard collection generics are not supported in python < 3.9",
+)
+def test_python_std_list_dict_generics():
+    """Test that supporting std list/dict generic dtypes work."""
+    schema = pa.DataFrameSchema(
+        {
+            "dict_column": pa.Column(dict[str, int]),
+            "list_column": pa.Column(list[float]),
+            "tuple_column": pa.Column(tuple[int, str, float]),
+        },
+    )
+
+    class Model(pa.DataFrameModel):
+        dict_column: dict[str, int]
+        list_column: list[float]
+        tuple_column: tuple[int, str, float]
+
+    data = pd.DataFrame(
+        {
+            "dict_column": [{"foo": 1, "bar": 2}],
+            "list_column": [[1.0]],
+            "tuple_column": [(1, "bar", 1.0)],
+        }
+    )
+    schema.validate(data)
+    Model.validate(data)
+
+
+@pytest.mark.parametrize("nullable", [True, False])
+@pytest.mark.parametrize(
+    "data_dict",
+    [
+        {
+            "dict_column": [{"foo": 1}, {"foo": 1, "bar": 2}, {}, None],
+            "list_column": [[1.0], [1.0, 2.0], [], None],
+        },
+        {
+            "dict_column": [{"foo": "1"}, {"foo": "1", "bar": "2"}, {}, None],
+            "list_column": [["1.0"], ["1.0", "2.0"], [], None],
+        },
+    ],
+)
+def test_python_typing_handle_empty_list_dict_and_none(nullable, data_dict):
+    """
+    Test that None values for dicts and lists are handled by nullable check.
+    """
+
+    schema = pa.DataFrameSchema(
+        {
+            "dict_column": pa.Column(Dict[str, int], nullable=nullable),
+            "list_column": pa.Column(List[float], nullable=nullable),
+        },
+        coerce=True,
+    )
+
+    class Model(pa.DataFrameModel):
+        dict_column: Dict[str, int] = pa.Field(nullable=nullable)
+        list_column: List[float] = pa.Field(nullable=nullable)
+
+        class Config:
+            coerce = True
+
+    data = pd.DataFrame(data_dict)
+
+    expected = pd.DataFrame(
+        {
+            "dict_column": [{"foo": 1}, {"foo": 1, "bar": 2}, {}, pd.NA],
+            "list_column": [[1.0], [1.0, 2.0], [], pd.NA],
+        }
+    )
+
+    if nullable:
+        assert schema.validate(data).equals(expected)
+        assert Model.validate(data).equals(expected)
+    else:
+        with pytest.raises(pa.errors.SchemaError):
+            schema.validate(data)
+        with pytest.raises(pa.errors.SchemaError):
+            Model.validate(data)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 9),
+    reason="standard collection generics are not supported in python < 3.9",
+)
+@pytest.mark.parametrize("nullable", [True, False])
+@pytest.mark.parametrize(
+    "data_dict",
+    [
+        {
+            "dict_column": [{"foo": 1}, {"foo": 1, "bar": 2}, {}, None],
+            "list_column": [[1.0], [1.0, 2.0], [], None],
+        },
+        {
+            "dict_column": [{"foo": "1"}, {"foo": "1", "bar": "2"}, {}, None],
+            "list_column": [["1.0"], ["1.0", "2.0"], [], None],
+        },
+    ],
+)
+def test_python_std_list_dict_empty_and_none(nullable, data_dict):
+    """
+    Test that None values for standard dicts and lists are handled by nullable
+    check.
+    """
+
+    schema = pa.DataFrameSchema(
+        {
+            "dict_column": pa.Column(dict[str, int], nullable=nullable),
+            "list_column": pa.Column(list[float], nullable=nullable),
+        },
+        coerce=True,
+    )
+
+    class Model(pa.DataFrameModel):
+        dict_column: dict[str, int] = pa.Field(nullable=nullable)
+        list_column: list[float] = pa.Field(nullable=nullable)
+
+        class Config:
+            coerce = True
+
+    data = pd.DataFrame(data_dict)
+
+    expected = pd.DataFrame(
+        {
+            "dict_column": [{"foo": 1}, {"foo": 1, "bar": 2}, {}, pd.NA],
+            "list_column": [[1.0], [1.0, 2.0], [], pd.NA],
+        }
+    )
+
+    if nullable:
+        assert schema.validate(data).equals(expected)
+        assert Model.validate(data).equals(expected)
+    else:
+        with pytest.raises(pa.errors.SchemaError):
+            schema.validate(data)
+        with pytest.raises(pa.errors.SchemaError):
+            Model.validate(data)
+
+
+def test_python_std_list_dict_error():
+    """Test that non-standard dict/list invalid values raise Schema Error."""
+    schema = pa.DataFrameSchema(
+        {
+            "dict_column": pa.Column(Dict[str, int]),
+            "list_column": pa.Column(List[float]),
+        },
+    )
+
+    class Model(pa.DataFrameModel):
+        dict_column: Dict[str, int]
+        list_column: List[float]
+
+    data = pd.DataFrame(
+        {
+            "dict_column": [{"foo": 1}, {"foo": 1, "bar": "2"}, {}],
+            "list_column": [[1.0], ["1.0", 2.0], []],
+        }
+    )
+
+    for validator in (schema, Model):
+        try:
+            validator.validate(data, lazy=True)
+        except pa.errors.SchemaErrors as exc:
+            assert exc.failure_cases["failure_case"].iloc[0] == {
+                "foo": 1,
+                "bar": "2",
+            }
+            assert exc.failure_cases["failure_case"].iloc[1] == ["1.0", 2.0]

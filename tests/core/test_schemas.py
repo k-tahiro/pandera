@@ -1,4 +1,5 @@
 """Testing creation and manipulation of DataFrameSchema objects."""
+
 # pylint: disable=too-many-lines,redefined-outer-name
 
 import copy
@@ -20,6 +21,7 @@ from pandera import (
     Index,
     Int,
     MultiIndex,
+    Parser,
     SeriesSchema,
     String,
     errors,
@@ -353,9 +355,7 @@ def test_ordered_dataframe(
         columns=["b", "a"],
         index=pd.MultiIndex.from_arrays([[1], [2]], names=["b", "a"]),
     )
-    with pytest.raises(
-        errors.SchemaErrors, match="A total of 1 schema errors"
-    ):
+    with pytest.raises(errors.SchemaErrors, match=r"out-of-order"):
         schema.validate(df, lazy=True)
 
     # test out-of-order duplicates
@@ -366,9 +366,7 @@ def test_ordered_dataframe(
             [[1], [2], [3], [4]], names=["a", "b", "c", "a"]
         ),
     )
-    with pytest.raises(
-        errors.SchemaErrors, match="A total of 1 schema errors"
-    ):
+    with pytest.raises(errors.SchemaErrors, match=r"out-of-order"):
         schema.validate(df, lazy=True)
 
 
@@ -394,8 +392,8 @@ def test_duplicate_columns_dataframe():
     assert not schema.unique_column_names
 
 
-def test_add_missing_columns():
-    """Test that missing columns are added."""
+def test_add_missing_columns_order():
+    """Test that missing columns are added in the correct order."""
     col_labels = ["a", "b", "c"]
 
     # Missing column is first in schema
@@ -474,6 +472,61 @@ def test_add_missing_columns():
         match="column 'a' in .* requires a default value when non-nullable add_missing_columns is enabled",
     ):
         schema_no_default_not_nullable.validate(frame_missing_first)
+
+    # Validate missing column isn't added multiple times when multiple
+    # trailing columns not in the schema exists in the dataframe
+    # https://github.com/unionai-oss/pandera/issues/1370
+    schema = DataFrameSchema(
+        columns={
+            "col_a": Column(str),
+            "col_missing": Column(str, nullable=True),
+        },
+        add_missing_columns=True,
+    )
+    df = pd.DataFrame(
+        {
+            "col_a": ["a", "b", "c"],
+            "col_b": ["d", "e", "f"],
+            "col_c": ["g", "h", "i"],
+        }
+    )
+    validated_frame_trailing = schema.validate(df)
+    assert validated_frame_trailing.columns.equals(
+        pd.Index(["col_a", "col_missing", "col_b", "col_c"])
+    )
+
+
+def test_add_missing_columns_dtype():
+    """Test that missing columns are added with the correct dtype."""
+    ref_df = pd.DataFrame(
+        {
+            "a": pd.Series([2, 5], dtype=np.int64),
+            "b": pd.Series([9, 9], dtype=np.int64),
+            "c": pd.Series([9, 9], dtype=np.int8),
+            "d": pd.Series([np.nan, np.nan], dtype=np.float64),
+            "e": pd.Series(
+                [7, 7], dtype=pd.SparseDtype(dtype=np.int8, fill_value=5)
+            ),
+            "f": pd.Series([pd.NA, pd.NA], dtype=pd.Int32Dtype()),
+        }
+    )
+
+    schema = DataFrameSchema(
+        columns={
+            "a": Column(np.int64),
+            "b": Column(np.int64, default=9),
+            "c": Column(np.int8, default=9),
+            "d": Column(np.float64, default=np.nan, nullable=True),
+            "e": Column(
+                pd.SparseDtype(dtype=np.int8, fill_value=5), default=7
+            ),
+            "f": Column(pd.Int32Dtype(), default=pd.NA, nullable=True),
+        },
+        add_missing_columns=True,
+        coerce=False,
+    )
+    test_df = schema.validate(pd.DataFrame(data={"a": [2, 5]}))
+    pd.testing.assert_frame_equal(ref_df, test_df)
 
 
 def test_series_schema() -> None:
@@ -613,6 +666,27 @@ def test_series_schema_with_index(coerce: bool) -> None:
     )
     assert isinstance(validated_series_multiindex, pd.Series)
     assert (validated_series_multiindex.index == multi_index).all()
+
+
+def test_series_schema_with_index_errors() -> None:
+    """Test that SeriesSchema raises errors for invalid index."""
+    schema_with_index = SeriesSchema(dtype=int, index=Index(int))
+    data = pd.Series([1, 2, 3], index=[1.0, 2.0, 3.0])
+    with pytest.raises(errors.SchemaError):
+        schema_with_index(data)
+
+    schema_with_index_check = SeriesSchema(
+        dtype=int, index=Index(float, Check(lambda x: x == 1.0))
+    )
+    with pytest.raises(errors.SchemaError):
+        schema_with_index_check(data)
+
+    schema_with_index_coerce = SeriesSchema(
+        dtype=int, index=Index(int, coerce=True)
+    )
+    expected = pd.Series([1, 2, 3], index=[1, 2, 3])
+    schema_with_index_coerce(data)
+    assert schema_with_index_coerce(data).equals(expected)
 
 
 class SeriesGreaterCheck:
@@ -785,7 +859,7 @@ def test_required() -> None:
 
     df_not_ok = pd.DataFrame({"col1": [1, 2]})
 
-    with pytest.raises(Exception):
+    with pytest.raises(errors.SchemaError):
         schema.validate(df_not_ok)
 
 
@@ -916,6 +990,7 @@ def test_schema_equality_operators():
     series_schema = SeriesSchema(
         str,
         checks=[Check(lambda s: s.str.startswith("foo"))],
+        parsers=Parser(lambda s: s.str.upper()),
         nullable=False,
         unique=False,
         name="my_series",
@@ -923,6 +998,7 @@ def test_schema_equality_operators():
     series_schema_base = ArraySchema(
         str,
         checks=[Check(lambda s: s.str.startswith("foo"))],
+        parsers=[Parser(lambda s: s.str.upper())],
         nullable=False,
         unique=False,
         name="my_series",
@@ -1138,7 +1214,7 @@ def test_rename_columns() -> None:
 
 
 @pytest.mark.parametrize(
-    "select_columns, schema",
+    "select_columns, schema, expected_order",
     [
         (
             ["col1", "col2"],
@@ -1149,6 +1225,18 @@ def test_rename_columns() -> None:
                     "col3": Column(int),
                 }
             ),
+            ["col1", "col2"],
+        ),
+        (
+            ["col3", "col1"],
+            DataFrameSchema(
+                columns={
+                    "col1": Column(int),
+                    "col2": Column(int),
+                    "col3": Column(int),
+                }
+            ),
+            ["col3", "col1"],
         ),
         (
             [("col1", "col1b"), ("col2", "col2b")],
@@ -1160,17 +1248,34 @@ def test_rename_columns() -> None:
                     ("col2", "col2b"): Column(int),
                 }
             ),
+            [("col1", "col1b"), ("col2", "col2b")],
+        ),
+        (
+            [("col2", "col2b"), ("col1", "col1b")],
+            DataFrameSchema(
+                columns={
+                    ("col1", "col1a"): Column(int),
+                    ("col1", "col1b"): Column(int),
+                    ("col2", "col2a"): Column(int),
+                    ("col2", "col2b"): Column(int),
+                }
+            ),
+            [("col2", "col2b"), ("col1", "col1b")],
         ),
     ],
 )
 def test_select_columns(
-    select_columns: List[Union[str, Tuple[str, str]]], schema: DataFrameSchema
+    select_columns: List[Union[str, Tuple[str, str]]],
+    schema: DataFrameSchema,
+    expected_order: List[Union[str, Tuple[str, str]]],
 ) -> None:
     """Check that select_columns method correctly creates new subset schema."""
     original_columns = list(schema.columns)
     schema_selected = schema.select_columns(select_columns)
+
     assert all(x in select_columns for x in schema_selected.columns)
     assert all(x in original_columns for x in schema.columns)
+    assert list(schema_selected.columns) == expected_order
 
     with pytest.raises(errors.SchemaInitError):
         schema.select_columns(["foo", "bar"])
@@ -1209,7 +1314,7 @@ def test_lazy_dataframe_validation_error() -> None:
         "DataFrameSchema": {
             # check name -> failure cases
             "column_in_schema": ["unknown_col"],
-            "dataframe_not_equal_1": [1],
+            "dataframe_not_equal_1": [{"int_col": 1.0, "float_col": 1.0}],
             "column_in_dataframe": ["not_in_dataframe"],
         },
         "Column": {
@@ -1219,10 +1324,10 @@ def test_lazy_dataframe_validation_error() -> None:
         },
     }
 
-    with pytest.raises(
-        errors.SchemaErrors, match="A total of .+ schema errors were found"
-    ):
+    with pytest.raises(errors.SchemaErrors) as e:
         schema.validate(dataframe, lazy=True)
+
+    assert len(e.value.message["SCHEMA"]) == 3
 
     try:
         schema.validate(dataframe, lazy=True)
@@ -1570,9 +1675,9 @@ def test_lazy_dataframe_unique() -> None:
             Index(str, checks=Check.isin(["a", "b", "c"])),
             pd.DataFrame({"col": [1, 2, 3]}, index=["a", "b", "d"]),
             {
-                # expect that the data in the SchemaError is the pd.Index cast
-                # into a Series
-                "data": pd.Series(["a", "b", "d"]),
+                "data": pd.DataFrame(
+                    {"col": [1, 2, 3]}, index=["a", "b", "d"]
+                ),
                 "schema_errors": {
                     "Index": {"isin(['a', 'b', 'c'])": ["d"]},
                 },
@@ -1593,8 +1698,6 @@ def test_lazy_dataframe_unique() -> None:
                 ),
             ),
             {
-                # expect that the data in the SchemaError is the pd.MultiIndex
-                # cast into a DataFrame
                 "data": pd.DataFrame(
                     {"column": [1, 2, 3]},
                     index=pd.MultiIndex.from_arrays(
@@ -1672,12 +1775,12 @@ def test_capture_check_errors() -> None:
 @pytest.mark.parametrize(
     "from_dtype,to_dtype",
     [
-        # [float, int],
-        # [int, float],
-        # [object, int],
-        # [object, float],
+        [float, int],
+        [int, float],
+        [object, int],
+        [object, float],
         [int, object],
-        # [float, object],
+        [float, object],
     ],
 )
 def test_schema_coerce_inplace_validation(
@@ -1968,6 +2071,7 @@ def test_dataframe_duplicated_columns(data, error, schema) -> None:
             DataFrameSchema(
                 columns={"col": Column(int)},
                 checks=Check.gt(0),
+                parsers=Parser(lambda x: x),
                 index=Index(int),
                 dtype=int,
                 coerce=True,
@@ -1978,6 +2082,7 @@ def test_dataframe_duplicated_columns(data, error, schema) -> None:
             [
                 "columns",
                 "checks",
+                "parsers",
                 "index",
                 "dtype",
                 "coerce",
@@ -2345,6 +2450,33 @@ def test_drop_invalid_for_model_schema():
         MySchema.validate(actual_obj, lazy=False)
 
 
+def test_schema_coerce() -> None:
+    """Test that setting coerce=True for a DataFrameSchema is sufficient to coerce a column."""
+
+    schema = DataFrameSchema(
+        columns={"col": Column(dtype=bool)},
+        coerce=True,
+    )
+
+    df = pd.DataFrame({"col": [1, 0]})
+
+    assert isinstance(schema.validate(df), pd.DataFrame)
+
+
+def test_schema_coerce_with_regex() -> None:
+    """Test that setting coerce=True for a DataFrameSchema is sufficient to coerce a column in the case
+    where the column has regex=True."""
+
+    schema_with_regex = DataFrameSchema(
+        columns={"col": Column(dtype=bool, regex=True)},
+        coerce=True,
+    )
+
+    df = pd.DataFrame({"col": [1, 0]})
+
+    assert isinstance(schema_with_regex.validate(df), pd.DataFrame)
+
+
 @pytest.mark.parametrize(
     "schema, obj, expected_obj",
     [
@@ -2510,3 +2642,38 @@ def test_get_schema_metadata():
         }
     }
     assert expected == metadata
+
+
+@pytest.fixture()
+def xfail_int_with_nans(request):
+    dtype = request.getfixturevalue("dtype")
+    input_value = request.getfixturevalue("input_value")
+    coerce = request.getfixturevalue("coerce")
+
+    if dtype == "Int64" and input_value is not None and not coerce:
+        pytest.xfail("NaN is considered a Float64")
+
+
+@pytest.mark.parametrize(
+    "dtype,default",
+    [
+        (str, "a default"),
+        (bool, True),
+        (bool, False),
+        (float, 42.0),
+        ("Int64", 0),
+    ],
+)
+@pytest.mark.parametrize("input_value", [None, np.nan])
+@pytest.mark.parametrize("coerce", [True, False])
+@pytest.mark.usefixtures("xfail_int_with_nans")
+def test_schema_column_default_handle_nans(
+    input_value: Any, coerce: bool, dtype: Any, default: Any
+):
+    """Test ``default`` fills ``nan`` values as expected."""
+    schema = DataFrameSchema(
+        columns={"column1": Column(dtype, default=default, coerce=coerce)}
+    )
+    df = pd.DataFrame({"column1": [input_value]})
+    schema.validate(df, inplace=True)
+    assert df.iloc[0]["column1"] == default

@@ -8,17 +8,18 @@ with open("pandera/version.py") as fp:
     exec(fp.read(), version)
 
 _extras_require = {
-    "strategies": ["hypothesis >= 5.41.1"],
+    "strategies": ["hypothesis >= 6.92.7"],
     "hypotheses": ["scipy"],
     "io": ["pyyaml >= 5.1", "black", "frictionless <= 4.40.8"],
-    "pyspark": ["pyspark >= 3.2.0"],
-    "modin": ["modin", "ray", "dask"],
+    "pyspark": ["pyspark[connect] >= 3.2.0"],
+    "modin": ["modin", "ray", "dask[dataframe]"],
     "modin-ray": ["modin", "ray"],
-    "modin-dask": ["modin", "dask"],
-    "dask": ["dask"],
+    "modin-dask": ["modin", "dask[dataframe]"],
+    "dask": ["dask[dataframe]"],
     "mypy": ["pandas-stubs"],
     "fastapi": ["fastapi"],
     "geopandas": ["geopandas", "shapely"],
+    "polars": ["polars >= 0.20.0"],
 }
 
 extras_require = {
@@ -45,18 +46,16 @@ setup(
     packages=find_packages(include=["pandera*"]),
     package_data={"pandera": ["py.typed"]},
     install_requires=[
-        "multimethod",
         "numpy >= 1.19.0",
         "packaging >= 20.0",
         "pandas >= 1.2.0",
         "pydantic",
-        "typeguard >= 3.0.2",
-        "typing_extensions >= 3.7.4.3 ; python_version<'3.8'",
+        "typeguard",
+        "typing_extensions >= 3.7.4.3",
         "typing_inspect >= 0.6.0",
-        "wrapt",
     ],
     extras_require=extras_require,
-    python_requires=">=3.7",
+    python_requires=">=3.8",
     platforms="any",
     classifiers=[
         "Development Status :: 5 - Production/Stable",
@@ -65,11 +64,11 @@ setup(
         "Intended Audience :: Science/Research",
         "Programming Language :: Python",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering",
     ],
 )

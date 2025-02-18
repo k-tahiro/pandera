@@ -39,7 +39,7 @@ Pandera offers a `environment.yml` to set up a conda-based environment and
 Install [miniconda](https://docs.conda.io/en/latest/miniconda.html), then run:
 
 ```bash
-conda create -n pandera-dev python=3.8  # or any python version 3.7+
+conda create -n pandera-dev python=3.12  # or any python version 3.8+
 conda env update -n pandera-dev -f environment.yml
 conda activate pandera-dev
 pip install -e .
@@ -52,7 +52,7 @@ pip install virtualenv
 virtualenv .venv/pandera-dev
 source .venv/pandera-dev/bin/activate
 pip install --upgrade pip
-pip install -r requirements-dev.txt
+pip install -r dev/requirements-3.12.txt  # or any python version 3.8+
 pip install -e .
 ```
 
@@ -70,13 +70,39 @@ make docs
 
 #### Adding New Dependencies
 
-To add new dependencies to the project, make sure to alter the _environment.yml_ file. Then to sync the dependencies from the _environment.yml_ file to the _requirements-dev.txt_ run the following command
+This repo uses [mamba](https://github.com/mamba-org/mamba), which is a faster
+implementation of [miniconda](https://docs.conda.io/en/latest/miniconda.html),
+to run the `nox` test suite. Simply install it via conda-forge:
 
 ```bash
-python scripts/generate_pip_deps_from_conda.py
+conda install -c conda-forge mamba
 ```
 
-Moreover to add new dependencies in setup.py, it is necessary to add it to the **_extras_require** dictionary.
+To add new dependencies to the project, first alter the `environment.yml` file. Then to sync the dependencies from the `environment.yml` file to the `requirements.in`, run the following command:
+
+```bash
+make nox-requirements
+```
+
+This will:
+
+- Invoke `python scripts/generate_pip_deps_from_conda.py` to convert `environment.yml`
+  to a `requirements.in` file.
+- Use `pip-compile` via the `uv` package to create requirements files in the
+  `ci` and `dev` directories. The `ci` requirements files are used by github
+   actions, while those in the `dev` directory should be used to create local
+   development enviornments.
+
+You can use the resulting `requirements-{3.x}.txt` file to install your dependencies
+with `pip`:
+
+```bash
+pip install -r dev/requirements-{3.x}.txt  # replace {3.x} with desired python version
+```
+
+Moreover to add new extra dependencies in setup.py, it is necessary to add it to
+the **_extras_require** dictionary.
+
 
 #### Set up `pre-commit`
 
@@ -121,26 +147,33 @@ Before submitting your changes for review, make sure to check that your changes
 do not break any tests by running:
 
 ```bash
-# option 1: if you're working with conda (recommended)
-make nox-conda
-
-# option 2: if you're working with virtualenv
-make nox
+make nox-tests
 ```
 
-Option 2 assumes that you have python environments for all of the versions
-that pandera supports.
+### Run a Specific Test Suite Locally
 
-#### Using `mamba` (optional)
-
-You can also use [mamba](https://github.com/mamba-org/mamba), which is a faster
-implementation of [miniconda](https://docs.conda.io/en/latest/miniconda.html),
-to run the `nox` test suite. Simply install it via conda-forge, and
-`make nox-conda` should use it under the hood.
+The above command will run the tests in mamba virtual environments for all of
+the supported pandera extras packages, versions of python, pandas, etc. To run
+a test for a specific set of versions, first run:
 
 ```bash
-conda install -c conda-forge mamba
-make nox-conda
+nox --list
+```
+
+You should see an output like this:
+
+```bash
+...
+* tests(extra='core', pydantic='1.10.11', python='3.8', pandas='1.5.3') -> Run the test suite.
+* tests(extra='strategies', pydantic='1.10.11', python='3.8', pandas='1.5.3') -> Run the test suite.
+* tests(extra='hypotheses', pydantic='1.10.11', python='3.8', pandas='1.5.3') -> Run the test suite.
+...
+```
+
+Then run a specific test condition with:
+
+```bash
+nox -db mamba --envdir .nox-mamba -s "tests(extra='core', pydantic='1.10.11', python='3.8', pandas='1.5.3')"
 ```
 
 ### Project Releases

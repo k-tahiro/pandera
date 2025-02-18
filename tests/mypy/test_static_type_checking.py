@@ -54,7 +54,11 @@ PANDAS_DATAFRAME_ERRORS = [
 ]
 
 
-def test_mypy_pandas_dataframe(capfd) -> None:
+@pytest.mark.parametrize(
+    ["config_file", "expected_errors"],
+    [("no_plugin.ini", PANDAS_DATAFRAME_ERRORS), ("plugin_mypy.ini", [])],
+)
+def test_mypy_pandas_dataframe(capfd, config_file, expected_errors) -> None:
     """Test that mypy raises expected errors on pandera-decorated functions."""
     # pylint: disable=subprocess-run-check
     pytest.xfail(
@@ -71,13 +75,13 @@ def test_mypy_pandas_dataframe(capfd) -> None:
             "--cache-dir",
             cache_dir,
             "--config-file",
-            str(test_module_dir / "config" / "no_plugin.ini"),
+            str(test_module_dir / "config" / config_file),
         ],
         text=True,
     )
     errors = _get_mypy_errors("pandas_dataframe.py", capfd.readouterr().out)
-    assert len(PANDAS_DATAFRAME_ERRORS) == len(errors)
-    for expected, error in zip(PANDAS_DATAFRAME_ERRORS, errors):
+    assert len(expected_errors) == len(errors)
+    for expected, error in zip(expected_errors, errors):
         assert error["errcode"] == expected["errcode"]
         assert expected["msg"] == error["msg"] or re.match(
             expected["msg"], error["msg"]
@@ -99,7 +103,7 @@ def test_pandera_runtime_errors(fn) -> None:
     try:
         fn(pandas_dataframe.schema_df)
     except pa.errors.SchemaError as e:
-        assert e.failure_cases["failure_case"].item() == "age"
+        assert e.failure_cases == "age"
 
 
 PANDERA_INHERITANCE_ERRORS = [
@@ -125,7 +129,7 @@ PANDAS_INDEX_ERRORS = [
     {"msg": "Incompatible types in assignment", "errcode": "assignment"},
 ] * 3
 
-PANDAS_SERIES_ERRORS = [
+PANDAS_SERIES_ERRORS_NO_PLUGIN = [
     {
         "msg": (
             'Argument 1 to "fn" has incompatible type "Series[float]"; '
@@ -133,6 +137,23 @@ PANDAS_SERIES_ERRORS = [
         ),
         "errcode": "arg-type",
     }
+]
+
+PANDAS_SERIES_ERRORS_PLUGIN = [
+    {
+        "msg": (
+            'Argument "s" to "fn" has incompatible type "Series[float]"; '
+            'expected "Series[str]"'
+        ),
+        "errcode": "arg-type",
+    },
+    {
+        "msg": (
+            'Argument 1 to "fn" has incompatible type "Series[float]"; '
+            'expected "Series[str]"'
+        ),
+        "errcode": "arg-type",
+    },
 ]
 
 
@@ -155,8 +176,8 @@ PANDAS_SERIES_ERRORS = [
         ["python_slice.py", "plugin_mypy.ini", PYTHON_SLICE_ERRORS],
         ["pandas_index.py", "no_plugin.ini", []],
         ["pandas_index.py", "plugin_mypy.ini", []],
-        ["pandas_series.py", "no_plugin.ini", PANDAS_SERIES_ERRORS],
-        ["pandas_series.py", "plugin_mypy.ini", PANDAS_SERIES_ERRORS],
+        ["pandas_series.py", "no_plugin.ini", PANDAS_SERIES_ERRORS_NO_PLUGIN],
+        ["pandas_series.py", "plugin_mypy.ini", PANDAS_SERIES_ERRORS_PLUGIN],
     ],
 )
 def test_pandas_stubs_false_positives(

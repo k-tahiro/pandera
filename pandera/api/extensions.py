@@ -12,14 +12,6 @@ import typing_inspect
 
 from pandera.api.checks import Check
 from pandera.api.hypotheses import Hypothesis
-from pandera.strategies.base_strategies import STRATEGY_DISPATCHER
-
-try:
-    import pyspark.sql as ps
-
-    PYSPARK_INSTALLED = True
-except ImportError:  # pragma: no cover
-    PYSPARK_INSTALLED = False
 
 
 class BuiltinCheckRegistrationError(Exception):
@@ -35,6 +27,7 @@ def register_builtin_check(
     fn=None,
     strategy: Optional[Callable] = None,
     _check_cls: Type = Check,
+    aliases: Optional[List[str]] = None,
     **outer_kwargs,
 ):
     """Register a check method to the Check namespace.
@@ -42,19 +35,21 @@ def register_builtin_check(
     This is the primary way for extending the Check api to define additional
     built-in checks.
     """
+    from pandera.strategies.base_strategies import STRATEGY_DISPATCHER
 
     if fn is None:
         return partial(
             register_builtin_check,
             strategy=strategy,
             _check_cls=_check_cls,
+            aliases=aliases,
             **outer_kwargs,
         )
 
     name = fn.__name__
 
     # see if the check function is already registered
-    check_fn = _check_cls.CHECK_FUNCTION_REGISTRY.get(name)
+    check_dispatcher = _check_cls.CHECK_FUNCTION_REGISTRY.get(name)
     fn_sig = signature(fn)
 
     # register the check strategy for this particular check, identified
@@ -75,7 +70,7 @@ def register_builtin_check(
         for dt in data_types:
             STRATEGY_DISPATCHER[(name, dt)] = strategy
 
-    if check_fn is None:  # pragma: no cover
+    if check_dispatcher is None:  # pragma: no cover
         raise BuiltinCheckRegistrationError(
             f"Check '{name}' doesn't have a base check implementation. "
             f"You need to create a stub method in the {_check_cls} class and "
@@ -85,7 +80,7 @@ def register_builtin_check(
             "`pandera.backends.pandas.builtin_checks` modules as an example."
         )
 
-    check_fn.register(fn)  # type: ignore
+    check_dispatcher.register(fn)  # type: ignore
 
     return fn
 
@@ -180,8 +175,16 @@ def register_check_method(  # pylint:disable=too-many-branches
     :return: register check function wrapper.
     """
 
-    # pylint: disable=import-outside-toplevel
+    # pylint: disable=import-outside-toplevel,too-many-statements
     from pandera.strategies.pandas_strategies import register_check_strategy
+
+    # NOTE: this needs to handle different dataframe types more elegantly
+    try:
+        import pyspark.sql as ps
+
+        PYSPARK_INSTALLED = True
+    except ImportError:  # pragma: no cover
+        PYSPARK_INSTALLED = False
 
     if statistics is None:
         statistics = []
@@ -287,6 +290,10 @@ def register_check_method(  # pylint:disable=too-many-branches
                     stats[k] = v
                 else:
                     check_kwargs[k] = v
+
+            error_stats = ", ".join(f"{k}={v}" for k, v in stats.items())
+            if stats and "error" not in check_kwargs:
+                check_kwargs["error"] = f"{check_fn.__name__}({error_stats})"
 
             return cls(
                 partial(check_fn_wrapper, **stats),

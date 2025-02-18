@@ -8,16 +8,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import pandas as pd
 from pydantic import BaseModel
 
+from pandera.api.base.error_handler import ErrorHandler
 from pandera.api.pandas.types import is_table
-from pandera.backends.base import CoreCheckResult
-from pandera.backends.pandas.base import ColumnInfo, PandasSchemaBackend
+from pandera.backends.base import ColumnInfo, CoreCheckResult, CoreParserResult
+from pandera.backends.pandas.base import PandasSchemaBackend
 from pandera.backends.pandas.error_formatters import (
     reshape_failure_cases,
-    scalar_failure_case,
 )
-from pandera.backends.pandas.utils import convert_uniquesettings
+from pandera.backends.utils import convert_uniquesettings
+from pandera.config import ValidationScope
 from pandera.engines import pandas_engine
-from pandera.error_handlers import SchemaErrorHandler
 from pandera.errors import (
     ParserError,
     SchemaDefinitionError,
@@ -25,6 +25,7 @@ from pandera.errors import (
     SchemaErrorReason,
     SchemaErrors,
 )
+from pandera.validation_depth import validate_scope, validation_type
 
 
 class DataFrameSchemaBackend(PandasSchemaBackend):
@@ -61,7 +62,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 "When drop_invalid_rows is True, lazy must be set to True."
             )
 
-        error_handler = SchemaErrorHandler(lazy)
+        error_handler = ErrorHandler(lazy)
 
         check_obj = self.preprocess(check_obj, inplace=inplace)
         if hasattr(check_obj, "pandera"):
@@ -73,6 +74,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         core_parsers: List[Tuple[Callable[..., Any], Tuple[Any, ...]]] = [
             (self.add_missing_columns, (schema, column_info)),
             (self.strict_filter_columns, (schema, column_info)),
+            (self.set_defaults, (schema,)),
             (self.coerce_dtype, (schema,)),
         ]
 
@@ -80,9 +82,14 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
             try:
                 check_obj = parser(check_obj, *args)
             except SchemaError as exc:
-                error_handler.collect_error(exc.reason_code, exc)
+                error_handler.collect_error(
+                    validation_type(exc.reason_code), exc.reason_code, exc
+                )
             except SchemaErrors as exc:
-                error_handler.collect_errors(exc)
+                error_handler.collect_errors(exc.schema_errors)
+
+        # run custom parsers
+        check_obj = self.run_parsers(schema, check_obj)
 
         # We may have modified columns, for example by
         # add_missing_columns, so regenerate column info
@@ -114,7 +121,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
             else:
                 raise SchemaErrors(
                     schema=schema,
-                    schema_errors=error_handler.collected_errors,
+                    schema_errors=error_handler.schema_errors,
                     data=check_obj,
                 )
 
@@ -144,7 +151,10 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
             (self.check_column_names_are_unique, (check_obj, schema)),
             (self.check_column_presence, (check_obj, schema, column_info)),
             (self.check_column_values_are_unique, (sample, schema)),
-            (self.run_schema_component_checks, (sample, components, lazy)),
+            (
+                self.run_schema_component_checks,
+                (sample, schema, components, lazy),
+            ),
             (self.run_checks, (sample, schema)),
         ]
         for check, args in core_checks:
@@ -170,9 +180,10 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                         reason_code=result.reason_code,
                     )
                 error_handler.collect_error(
+                    validation_type(result.reason_code),
                     result.reason_code,
                     error,
-                    original_exc=result.original_exc,
+                    result.original_exc,
                 )
 
         return error_handler
@@ -180,6 +191,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
     def run_schema_component_checks(
         self,
         check_obj: pd.DataFrame,
+        schema,
         schema_components: List,
         lazy: bool,
     ) -> List[CoreCheckResult]:
@@ -189,9 +201,27 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         # schema-component-level checks
         for schema_component in schema_components:
             try:
+                # make sure the schema component mutations are reverted after
+                # validation
+                _orig_dtype = schema_component.dtype
+                _orig_coerce = schema_component.coerce
+
+                if schema.dtype is not None:
+                    # override column dtype with dataframe dtype
+                    schema_component.dtype = schema.dtype  # type: ignore
+
+                # disable coercion at the schema component level since the
+                # dataframe-level schema already coerced it.
+                schema_component.coerce = False  # type: ignore
+
                 result = schema_component.validate(
                     check_obj, lazy=lazy, inplace=True
                 )
+
+                # revert the schema component mutations
+                schema_component.dtype = _orig_dtype
+                schema_component.coerce = _orig_coerce
+
                 check_passed.append(is_table(result))
             except SchemaError as err:
                 check_results.append(
@@ -247,7 +277,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                         check_index=check_index,
                         reason_code=SchemaErrorReason.CHECK_ERROR,
                         message=msg,
-                        failure_cases=scalar_failure_case(err_str),
+                        failure_cases=err_str,
                         original_exc=err,
                     )
                 )
@@ -275,7 +305,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 try:
                     column_names.extend(
                         col_schema.get_backend(check_obj).get_regex_columns(
-                            col_schema, check_obj.columns
+                            col_schema, check_obj
                         )
                     )
                     regex_match_patterns.append(col_schema.name)
@@ -338,14 +368,8 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 or col_name in check_obj
                 or col_name in column_info.regex_match_patterns
             ) and col_name not in column_info.absent_column_names:
-                col = copy.deepcopy(col)
-                if schema.dtype is not None:
-                    # override column dtype with dataframe dtype
-                    col.dtype = schema.dtype  # type: ignore
-
-                # disable coercion at the schema component level since the
-                # dataframe-level schema already coerced it.
-                col.coerce = False  # type: ignore
+                if col.name != col_name:
+                    col.name = col_name
                 schema_components.append(col)
 
         if schema.index is not None:
@@ -381,17 +405,16 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                         f" {schema.columns} requires a default value "
                         f"when non-nullable add_missing_columns is enabled"
                     ),
-                    failure_cases=scalar_failure_case(col_name),
+                    failure_cases=col_name,
                     check="add_missing_has_default",
                     reason_code=SchemaErrorReason.ADD_MISSING_COLUMN_NO_DEFAULT,
                 )
 
-        # Ascertain order in which missing columns should
-        # be inserted into dataframe. Be careful not to
-        # modify order of existing dataframe columns to
-        # avoid ripple effects in downstream validation
+        # Ascertain order in which missing columns should be inserted into
+        # dataframe. Be careful not to modify order of existing dataframe
+        # columns to avoid ripple effects in downstream validation
         # (e.g., ordered schema).
-        schema_cols_dict: Dict[Any, None] = dict()
+        schema_cols_dict: Dict[Any, None] = {}
         for col_name, col_schema in schema.columns.items():
             if col_name in check_obj.columns or col_schema.required:
                 schema_cols_dict[col_name] = None
@@ -400,7 +423,10 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         for col_name in check_obj.columns:
             pop_cols = []
             for next_col_name in iter(schema_cols_dict):
-                if next_col_name in column_info.absent_column_names:
+                if (
+                    next_col_name in column_info.absent_column_names
+                    and next_col_name not in concat_ordered_cols
+                ):
                     # Next schema column is missing from dataframe,
                     # so mark for insertion here
                     concat_ordered_cols.append(next_col_name)
@@ -423,15 +449,13 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 concat_ordered_cols.append(col_name)
 
         # Create companion dataframe of default values for missing columns
-        defaults = {
-            c: schema.columns[c].default
-            for c in column_info.absent_column_names
+        missing_cols_schema = {
+            k: v
+            for k, v in schema.columns.items()
+            if k in column_info.absent_column_names
         }
-
-        missing_obj = pd.DataFrame(
-            data=defaults,
-            columns=column_info.absent_column_names,
-            index=check_obj.index,
+        missing_obj = self._construct_missing_df(
+            check_obj, missing_cols_schema
         )
 
         # Append missing columns
@@ -441,6 +465,33 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         concat_obj = concat_obj[concat_ordered_cols]
 
         return concat_obj
+
+    def _construct_missing_df(
+        self,
+        obj: pd.DataFrame,
+        missing_cols_schema: Dict[str, Any],
+    ) -> pd.DataFrame:
+        """Construct dataframe of missing columns with their default values.
+
+        :param obj: dataframe of master dataframe from which to take index.
+        :param missing_cols_schema: dictionary of Column schemas
+        :returns: dataframe of missing columns
+        """
+        missing_obj = pd.DataFrame(
+            data={k: v.default for k, v in missing_cols_schema.items()},
+            index=obj.index,
+        )
+
+        # Can't specify multiple dtypes in frame construction and
+        # constructing the frame as a concatenation of indexed
+        # series is relatively slow due to copying the index for
+        # each one. Coerce dtypes afterwards instead.
+        for c in missing_obj.columns:
+            missing_obj[c] = missing_cols_schema[c].dtype.try_coerce(
+                missing_obj[c]
+            )
+
+        return missing_obj
 
     def strict_filter_columns(
         self, check_obj: pd.DataFrame, schema, column_info: ColumnInfo
@@ -464,7 +515,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                         f"column '{column}' not in {schema.__class__.__name__}"
                         f" {schema.columns}"
                     ),
-                    failure_cases=scalar_failure_case(column),
+                    failure_cases=column,
                     check="column_in_schema",
                     reason_code=SchemaErrorReason.COLUMN_NOT_IN_SCHEMA,
                 )
@@ -480,7 +531,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                         schema=schema,
                         data=check_obj,
                         message=f"column '{column}' out-of-order",
-                        failure_cases=scalar_failure_case(column),
+                        failure_cases=column,
                         check="column_ordered",
                         reason_code=SchemaErrorReason.COLUMN_NOT_ORDERED,
                     )
@@ -495,6 +546,22 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
 
         return check_obj
 
+    def set_defaults(self, check_obj: pd.DataFrame, schema):
+        """Sets default values for missing values."""
+        assert schema is not None, "The `schema` argument must be provided."
+
+        for col_name, col_schema in schema.columns.items():
+            if (
+                pd.isna(col_schema.default)
+                or col_name not in check_obj.columns
+            ):
+                continue
+            check_obj[col_name] = check_obj[col_name].fillna(
+                col_schema.default
+            )
+
+        return check_obj
+
     def coerce_dtype(
         self,
         check_obj: pd.DataFrame,
@@ -503,7 +570,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         """Coerces check object to the expected type."""
         assert schema is not None, "The `schema` argument must be provided."
 
-        error_handler = SchemaErrorHandler(lazy=True)
+        error_handler = ErrorHandler(lazy=True)
 
         if not (
             schema.coerce
@@ -517,11 +584,13 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         except SchemaErrors as err:
             for schema_error in err.schema_errors:
                 error_handler.collect_error(
+                    validation_type(SchemaErrorReason.SCHEMA_COMPONENT_CHECK),
                     SchemaErrorReason.SCHEMA_COMPONENT_CHECK,
                     schema_error,
                 )
         except SchemaError as err:
             error_handler.collect_error(
+                validation_type(SchemaErrorReason.SCHEMA_COMPONENT_CHECK),
                 SchemaErrorReason.SCHEMA_COMPONENT_CHECK,
                 err,
             )
@@ -531,7 +600,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
             # error_handler
             raise SchemaErrors(
                 schema=schema,
-                schema_errors=error_handler.collected_errors,
+                schema_errors=error_handler.schema_errors,
                 data=check_obj,
             )
 
@@ -548,7 +617,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         :returns: dataframe with coerced dtypes
         """
         # NOTE: clean up the error handling!
-        error_handler = SchemaErrorHandler(lazy=True)
+        error_handler = ErrorHandler(lazy=True)
 
         def _coerce_df_dtype(obj: pd.DataFrame) -> pd.DataFrame:
             if schema.dtype is None:
@@ -563,6 +632,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 raise SchemaError(
                     schema=schema,
                     data=obj,
+                    reason_code=SchemaErrorReason.DATATYPE_COERCION,
                     message=(
                         f"Error while coercing '{schema.name}' to type "
                         f"{schema.dtype}: {exc}\n{exc.failure_cases}"
@@ -576,6 +646,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 return coerce_fn(obj)
             except SchemaError as exc:
                 error_handler.collect_error(
+                    validation_type(SchemaErrorReason.DATATYPE_COERCION),
                     SchemaErrorReason.DATATYPE_COERCION,
                     exc,
                 )
@@ -586,14 +657,18 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 try:
                     matched_columns = col_schema.get_backend(
                         obj
-                    ).get_regex_columns(col_schema, obj.columns)
+                    ).get_regex_columns(col_schema, obj)
                 except SchemaError:
                     matched_columns = pd.Index([])
 
                 for matched_colname in matched_columns:
-                    if col_schema.coerce or schema.coerce:
+                    if (
+                        col_schema.coerce or schema.coerce
+                    ) and schema.dtype is None:
+                        _col_schema = copy.deepcopy(col_schema)
+                        _col_schema.coerce = True
                         obj[matched_colname] = _try_coercion(
-                            col_schema.coerce_dtype, obj[matched_colname]
+                            _col_schema.coerce_dtype, obj[matched_colname]
                         )
             elif (
                 (col_schema.coerce or schema.coerce)
@@ -621,16 +696,30 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
         if error_handler.collected_errors:
             raise SchemaErrors(
                 schema=schema,
-                schema_errors=error_handler.collected_errors,
+                schema_errors=error_handler.schema_errors,
                 data=obj,
             )
 
         return obj
 
+    def run_parsers(self, schema, check_obj):
+        """Run parsers"""
+        parser_results: List[CoreParserResult] = []
+        for parser_index, parser in enumerate(schema.parsers):
+            result = self.run_parser(
+                check_obj,
+                parser,
+                parser_index,
+            )
+            check_obj = result.parser_output
+            parser_results.append(result)
+        return check_obj
+
     ##########
     # Checks #
     ##########
 
+    @validate_scope(scope=ValidationScope.SCHEMA)
     def check_column_names_are_unique(
         self,
         check_obj: pd.DataFrame,
@@ -655,7 +744,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                 "dataframe contains multiple columns with label(s): "
                 f"{failed.tolist()}"
             )
-            failure_cases = scalar_failure_case(failed)
+            failure_cases = failed
 
         return CoreCheckResult(
             passed=passed,
@@ -665,7 +754,7 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
             failure_cases=failure_cases,
         )
 
-    # pylint: disable=unused-argument
+    @validate_scope(scope=ValidationScope.SCHEMA)
     def check_column_presence(
         self, check_obj: pd.DataFrame, schema, column_info: ColumnInfo
     ) -> List[CoreCheckResult]:
@@ -679,14 +768,15 @@ class DataFrameSchemaBackend(PandasSchemaBackend):
                         check="column_in_dataframe",
                         reason_code=SchemaErrorReason.COLUMN_NOT_IN_DATAFRAME,
                         message=(
-                            f"column '{colname}' not in dataframe"
-                            f"\n{check_obj.head()}"
+                            f"column '{colname}' not in dataframe. "
+                            f"Columns in dataframe: {check_obj.columns.tolist()}"
                         ),
-                        failure_cases=scalar_failure_case(colname),
+                        failure_cases=colname,
                     )
                 )
         return results
 
+    @validate_scope(scope=ValidationScope.DATA)
     def check_column_values_are_unique(
         self, check_obj: pd.DataFrame, schema
     ) -> CoreCheckResult:
