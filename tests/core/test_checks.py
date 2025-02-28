@@ -490,7 +490,11 @@ def test_custom_check_error_is_failure_case(extra_registered_checks):
     try:
         test_schema.validate(df, lazy=True)
     except errors.SchemaErrors as err:
-        assert err.error_counts == {errors.SchemaErrorReason.CHECK_ERROR: 1}
+        assert err.error_counts == {"CHECK_ERROR": 1}
+        assert (
+            err.message["DATA"]["CHECK_ERROR"][0]["check"]
+            == "raise_an_error_check"
+        )
 
 
 def test_check_backend_not_found():
@@ -503,3 +507,15 @@ def test_check_backend_not_found():
 
     with pytest.raises(KeyError, match="Backend not found for class"):
         dummy_check(CustomDataObject())
+
+
+def test_check_output_dtype_with_empty_datetime():
+    from pandera.backends.pandas.register import register_pandas_backends
+
+    # NOTE: this should automatically be handles in the check.__call__ method
+    register_pandas_backends("pandas.DataFrame")
+
+    check = Check(lambda _: True, element_wise=True)
+    df = pd.DataFrame({"year_mon": pd.Series(dtype="datetime64[D]")})
+    check_result = check(df)
+    assert check_result.check_output.dtype == bool

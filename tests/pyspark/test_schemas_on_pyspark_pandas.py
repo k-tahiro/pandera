@@ -1,18 +1,20 @@
 """Test pandera on pyspark data structures."""
+
 import re
 import typing
 from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pyspark
 import pyspark.pandas as ps
 import pytest
 from packaging import version
-from pyspark import SparkContext
 
 import pandera as pa
+from pandera.typing import pyspark as pyspark_typing
 from pandera import dtypes, extensions, system
-from pandera.engines import numpy_engine, pandas_engine
+from pandera.engines import numpy_engine, pandas_engine, geopandas_engine
 from pandera.typing import DataFrame, Index, Series
 from tests.strategies.test_strategies import NULLABLE_DTYPES
 from tests.strategies.test_strategies import (
@@ -34,8 +36,8 @@ DTYPES = [
     dtype_cls
     for dtype_cls in pandas_engine.Engine.get_registered_dtypes()
     if not (
-        pandas_engine.GEOPANDAS_INSTALLED
-        and dtype_cls == pandas_engine.Geometry
+        geopandas_engine.GEOPANDAS_INSTALLED
+        and dtype_cls == geopandas_engine.Geometry
     )
 ]
 UNSUPPORTED_STRATEGY_DTYPE_CLS = set(UNSUPPORTED_STRATEGY_DTYPE_CLS)
@@ -62,7 +64,7 @@ PYSPARK_PANDAS_UNSUPPORTED = {
     pandas_engine.Date,
 }
 
-SPARK_VERSION = version.parse(SparkContext.getOrCreate().version)
+SPARK_VERSION = version.parse(pyspark.__version__)
 
 if SPARK_VERSION < version.parse("3.3.0"):
     PYSPARK_PANDAS_UNSUPPORTED.add(numpy_engine.Timedelta64)
@@ -279,8 +281,8 @@ def test_index_dtypes(
             pandas_engine.DateTime(tz="UTC"),  # type: ignore[call-arg]
         }
         and not (
-            pandas_engine.GEOPANDAS_INSTALLED
-            and dt == pandas_engine.Engine.dtype(pandas_engine.Geometry)
+            geopandas_engine.GEOPANDAS_INSTALLED
+            and dt == pandas_engine.Engine.dtype(geopandas_engine.Geometry)
         )
     ],
 )
@@ -340,8 +342,10 @@ def test_nullable(
         try:
             ks_null_sample: ps.DataFrame = ps.DataFrame(null_sample)
         except TypeError as exc:
+            # pylint: disable=no-member
+            exc_msg = exc.message if len(exc.args) == 0 else exc.args[0]
             match = re.search(
-                r"can not accept object (<NA>|NaT) in type", exc.args[0]
+                r"can not accept object `?(<NA>|NaT)`? in type", exc_msg
             )
             if match is None:
                 raise
@@ -551,11 +555,9 @@ def test_schema_model():
 
     # pylint: disable=too-few-public-methods
     class Schema(pa.DataFrameModel):
-        int_field: pa.typing.pyspark.Series[int] = pa.Field(gt=0)
-        float_field: pa.typing.pyspark.Series[float] = pa.Field(lt=0)
-        str_field: pa.typing.pyspark.Series[str] = pa.Field(
-            isin=["a", "b", "c"]
-        )
+        int_field: pyspark_typing.Series[int] = pa.Field(gt=0)
+        float_field: pyspark_typing.Series[float] = pa.Field(lt=0)
+        str_field: pyspark_typing.Series[str] = pa.Field(isin=["a", "b", "c"])
 
     valid_df = ps.DataFrame(
         {
@@ -618,10 +620,10 @@ def test_check_decorators():
 
     # pylint: disable=too-few-public-methods
     class InSchema(pa.DataFrameModel):
-        a: pa.typing.pyspark.Series[int]
+        a: pyspark_typing.Series[int]
 
     class OutSchema(InSchema):
-        b: pa.typing.pyspark.Series[int]
+        b: pyspark_typing.Series[int]
 
     @pa.check_input(in_schema)
     @pa.check_output(out_schema)
@@ -645,16 +647,16 @@ def test_check_decorators():
 
     @pa.check_types
     def function_check_types(
-        df: pa.typing.pyspark.DataFrame[InSchema],
-    ) -> pa.typing.pyspark.DataFrame[OutSchema]:
+        df: pyspark_typing.DataFrame[InSchema],
+    ) -> pyspark_typing.DataFrame[OutSchema]:
         df["b"] = df["a"] + 1
-        return typing.cast(pa.typing.pyspark.DataFrame[OutSchema], df)
+        return typing.cast(pyspark_typing.DataFrame[OutSchema], df)
 
     @pa.check_types
     def function_check_types_invalid(
-        df: pa.typing.pyspark.DataFrame[InSchema],
-    ) -> pa.typing.pyspark.DataFrame[OutSchema]:
-        return typing.cast(pa.typing.pyspark.DataFrame[OutSchema], df)
+        df: pyspark_typing.DataFrame[InSchema],
+    ) -> pyspark_typing.DataFrame[OutSchema]:
+        return typing.cast(pyspark_typing.DataFrame[OutSchema], df)
 
     valid_df = ps.DataFrame({"a": [1, 2, 3]})
     invalid_df = ps.DataFrame({"b": [1, 2, 3]})

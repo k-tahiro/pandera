@@ -1,14 +1,15 @@
 """Core pyspark column specification."""
 
 import copy
-from typing import Any, List, Optional, TypeVar, cast
+from typing import Any, List, Optional, Type, TypeVar, cast
 
 import pyspark.sql as ps
 
-from pandera.api.base.schema import BaseSchema, inferred_schema_guard
+from pandera.api.base.error_handler import ErrorHandler
+from pandera.api.base.schema import BaseSchema
 from pandera.api.checks import Check
-from pandera.api.pyspark.error_handler import ErrorHandler
 from pandera.api.pyspark.types import CheckList, PySparkDtypeInputTypes
+from pandera.backends.pyspark.register import register_pyspark_backends
 from pandera.dtypes import DataType
 from pandera.engines import pyspark_engine
 
@@ -68,6 +69,10 @@ class ColumnSchema(BaseSchema):
         self.title = title
         self.description = description
         self.metadata = metadata
+
+    @staticmethod
+    def register_default_backends(check_obj_cls: Type):
+        register_pyspark_backends()
 
     @property
     def dtype(self) -> DataType:
@@ -160,7 +165,6 @@ class ColumnSchema(BaseSchema):
     # Schema Transforms Methods #
     #############################
 
-    @inferred_schema_guard
     def update_checks(self, checks: List[Check]):
         """Create a new Schema with a new set of Checks
 

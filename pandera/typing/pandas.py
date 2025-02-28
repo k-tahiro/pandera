@@ -1,4 +1,5 @@
 """Typing definitions and helpers."""
+
 # pylint:disable=abstract-method,disable=too-many-ancestors
 import functools
 import io
@@ -15,11 +16,6 @@ from typing import (  # type: ignore[attr-defined]
     _type_check,
 )
 
-try:
-    from typing import get_args
-except ImportError:
-    from typing_extensions import get_args
-
 import numpy as np
 import pandas as pd
 
@@ -33,6 +29,7 @@ from pandera.typing.common import (
     SeriesBase,
 )
 from pandera.typing.formats import Formats
+from pandera.config import config_context
 
 try:
     from typing import _GenericAlias  # type: ignore[attr-defined]
@@ -41,8 +38,8 @@ except ImportError:  # pragma: no cover
 
 
 if PYDANTIC_V2:
-    from pydantic_core import core_schema
     from pydantic import GetCoreSchemaHandler
+    from pydantic_core import core_schema
 
 
 # pylint:disable=too-few-public-methods
@@ -53,14 +50,6 @@ class Index(IndexBase, pd.Index, Generic[GenericDtype]):
     """
 
 
-# pyspark.pandas actually patches the __class_getitem__ method of pd.Series and
-# pd.DataFrame, so import it here to make sure that we can override the patching
-try:
-    import pyspark.pandas  # pylint: disable=unused-import
-except ImportError:  # pragma: no cover
-    pass
-
-
 # pylint:disable=too-few-public-methods
 class Series(SeriesBase, pd.Series, Generic[GenericDtype]):  # type: ignore
     """Representation of pandas.Series, only used for type annotation.
@@ -68,14 +57,12 @@ class Series(SeriesBase, pd.Series, Generic[GenericDtype]):  # type: ignore
     *new in 0.5.0*
     """
 
-    if hasattr(pd.Series, "__class_getitem__") and _GenericAlias:
-
-        def __class_getitem__(cls, item):
-            """Define this to override the patch that pyspark.pandas performs on pandas.
-            https://github.com/apache/spark/blob/master/python/pyspark/pandas/__init__.py#L124-L144
-            """
-            _type_check(item, "Parameters to generic types must be types.")
-            return _GenericAlias(cls, item)
+    def __class_getitem__(cls, item):
+        """Define this to override the patch that pyspark.pandas performs on pandas.
+        https://github.com/apache/spark/blob/master/python/pyspark/pandas/__init__.py#L124-L144
+        """
+        _type_check(item, "Parameters to generic types must be types.")
+        return _GenericAlias(cls, item)
 
 
 # pylint:disable=invalid-name
@@ -93,14 +80,12 @@ class DataFrame(DataFrameBase, pd.DataFrame, Generic[T]):
     *new in 0.5.0*
     """
 
-    if hasattr(pd.DataFrame, "__class_getitem__") and _GenericAlias:
-
-        def __class_getitem__(cls, item):
-            """Define this to override the patch that pyspark.pandas performs on pandas.
-            https://github.com/apache/spark/blob/master/python/pyspark/pandas/__init__.py#L124-L144
-            """
-            _type_check(item, "Parameters to generic types must be types.")
-            return _GenericAlias(cls, item)
+    def __class_getitem__(cls, item):
+        """Define this to override the patch that pyspark.pandas performs on pandas.
+        https://github.com/apache/spark/blob/master/python/pyspark/pandas/__init__.py#L124-L144
+        """
+        _type_check(item, "Parameters to generic types must be types.")
+        return _GenericAlias(cls, item)
 
     @classmethod
     def from_format(cls, obj: Any, config) -> pd.DataFrame:
@@ -126,12 +111,13 @@ class DataFrame(DataFrameBase, pd.DataFrame, Generic[T]):
             reader = config.from_format
         else:
             reader = {
-                Formats.dict: pd.DataFrame,
+                Formats.dict: pd.DataFrame.from_dict,
                 Formats.csv: pd.read_csv,
                 Formats.json: pd.read_json,
                 Formats.feather: pd.read_feather,
                 Formats.parquet: pd.read_parquet,
                 Formats.pickle: pd.read_pickle,
+                Formats.json_normalize: pd.json_normalize,
             }[Formats(config.from_format)]
 
         return reader(obj, **(config.from_format_kwargs or {}))  # type: ignore
@@ -175,7 +161,7 @@ class DataFrame(DataFrameBase, pd.DataFrame, Generic[T]):
         if buffer is None:
             return out
         elif buffer.closed:
-            raise IOError(
+            raise OSError(
                 f"pandas=={pd.__version__} closed the buffer automatically "
                 f"using the serialization method {writer}. Use a later "
                 "version of pandas or use a different the serialization "
@@ -200,11 +186,34 @@ class DataFrame(DataFrameBase, pd.DataFrame, Generic[T]):
         def __get_pydantic_core_schema__(
             cls, _source_type: Any, _handler: GetCoreSchemaHandler
         ) -> core_schema.CoreSchema:
-            schema_model = get_args(_source_type)[0]
+            # prevent validation in __setattr__ function in DataFrameBase class
+            with config_context(validation_enabled=False):
+                schema_model = _source_type().__orig_class__.__args__[0]
+            schema = schema_model.to_schema()
+            schema_json_columns = schema_model.to_json_schema()["properties"]
+            type_map = {
+                "string": core_schema.str_schema(),
+                "integer": core_schema.int_schema(),
+                "number": core_schema.float_schema(),
+                "boolean": core_schema.bool_schema(),
+                "datetime": core_schema.datetime_schema(),
+            }
             return core_schema.no_info_plain_validator_function(
                 functools.partial(
                     cls.pydantic_validate,
                     schema_model=schema_model,
+                ),
+                json_schema_input_schema=core_schema.list_schema(
+                    core_schema.typed_dict_schema(
+                        {
+                            key: core_schema.typed_dict_field(
+                                type_map[
+                                    schema_json_columns[key]["items"]["type"]
+                                ]
+                            )
+                            for key in schema.columns.keys()
+                        },
+                    )
                 ),
             )
 

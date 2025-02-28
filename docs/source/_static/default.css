@@ -16,6 +16,8 @@ div.content {
 
 .sidebar-brand-text, .sidebar-logo-container {
   margin: var(--sidebar-item-spacing-vertical) auto;
+  margin-top: 25px;
+  margin-bottom: 25px;
 }
 
 .sidebar-brand-text {
@@ -28,7 +30,7 @@ div.content {
 }
 
 .sidebar-drawer .sidebar-container {
-  width: 23em;
+  width: 100%;
 }
 
 li.toctree-l2 {
@@ -85,6 +87,11 @@ div.sponsorship {
   border-color: #78ac1b;
 }
 
+iframe.jupyterlite_sphinx_raw_iframe {
+  border: none !important;
+  box-shadow: 0 0.2rem 0.2rem #dedede !important;
+}
+
 
 @media (max-width: 67em) {
   .sidebar-drawer {
@@ -100,6 +107,10 @@ div.sponsorship {
 }
 
 /* autosummary table text */
+table.autosummary {
+  width: 100%;
+}
+
 article .align-center, article .align-default {
   text-align: left;
 }
@@ -107,4 +118,62 @@ article .align-center, article .align-default {
 /* make font size of API reference smaller */
 section[id^=pandera-]:not([id=pandera-data-types]) h1  {
   font-size: 1.75em;
+}
+
+/* dataframe table style */
+div.cell_output thead {
+  color: var(--color-foreground-primary);
+}
+
+div.cell_output tbody tr {
+  color: var(--color-content-foreground);
+}
+
+div.cell_output tbody tr:nth-child(odd) {
+  background: var(--color-background-secondary);
+}
+
+
+/* code cell output style */
+div.cell details.below-input>summary {
+  background-color: var(--color-background-secondary);
+}
+
+/* algolia docsearch search bar */
+:root {
+  --docsearch-primary-color: #82B427;
+  --docsearch-searchbox-shadow: #82B427;
+}
+
+/* mute docsearch logo color */
+div.DocSearch-Logo .cls-1,
+div.DocSearch-Logo .cls-2 {
+    fill: #414c70 !important;
+}
+
+.DocSearch-Button {
+  height: 50px;
+  margin: 0;
+  width: 100%;
+  border-radius: 0;
+  border-bottom: 1px solid var(--color-header-border) !important;
+  border-top: 1px solid var(--color-header-border) !important;
+  background: var(--color-sidebar-background) !important;
+  padding: 0 15px !important;
+}
+
+.DocSearch-Button:hover, .DocSearch-Button:active {
+  box-shadow: none !important;
+  background: var(--docsearch-searchbox-background) !important;
+}
+
+.DocSearch-Button-Key, .DocSearch-Commands-Key {
+  border: none !important;
+  box-shadow: none !important;
+  display: inherit !important;
+  padding: 0 !important;
+}
+
+.sidebar-search-container::before {
+  content: none;
 }

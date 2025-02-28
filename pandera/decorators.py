@@ -1,10 +1,10 @@
 """Decorators for integrating pandera into existing data pipelines."""
+
 import functools
 import inspect
 import sys
 import types
 import typing
-from collections import OrderedDict
 from typing import (
     Any,
     Callable,
@@ -20,24 +20,31 @@ from typing import (
     overload,
 )
 
-import wrapt
+import pandas as pd
 from pydantic import validate_arguments
 
 from pandera import errors
-from pandera.api.pandas.array import SeriesSchema
-from pandera.api.pandas.container import DataFrameSchema
-from pandera.api.pandas.model import SchemaModel
-from pandera.error_handlers import SchemaErrorHandler
+from pandera.api.base.error_handler import ErrorHandler
+from pandera.api.dataframe.components import ComponentSchema
+from pandera.api.dataframe.container import DataFrameSchema
+from pandera.api.dataframe.model import DataFrameModel
 from pandera.inspection_utils import (
     is_classmethod_from_meta,
     is_decorated_classmethod,
 )
 from pandera.typing import AnnotationInfo
+from pandera.validation_depth import validation_type
 
-Schemas = Union[DataFrameSchema, SeriesSchema]
+Schemas = Union[DataFrameSchema, ComponentSchema]
 InputGetter = Union[str, int]
 OutputGetter = Union[str, int, Callable]
 F = TypeVar("F", bound=Callable)
+
+
+def _unwrap_fn(fn: Callable) -> Callable:
+    if hasattr(fn, "__wrapped__"):
+        return _unwrap_fn(fn.__wrapped__)
+    return fn
 
 
 def _get_fn_argnames(fn: Callable) -> List[str]:
@@ -59,8 +66,13 @@ def _get_fn_argnames(fn: Callable) -> List[str]:
     because that is when Python's handling of classmethods changed and wrapt mirrors it.
     See: https://github.com/GrahamDumpleton/wrapt/issues/182
     """
+    if hasattr(fn, "__wrapped__"):
+        return _get_fn_argnames(fn.__wrapped__)
+
     arg_spec_args = inspect.getfullargspec(fn).args
+
     first_arg_is_self = arg_spec_args[0] == "self"
+    first_arg_is_cls = arg_spec_args[0] == "cls"
     is_py_newer_than_39 = sys.version_info[:2] >= (3, 9)
     # Exclusion criteria
     is_regular_method = inspect.ismethod(fn) and first_arg_is_self
@@ -69,7 +81,9 @@ def _get_fn_argnames(fn: Callable) -> List[str]:
     )
     is_cls_method_from_meta_method = is_classmethod_from_meta(fn)
     if (
-        is_regular_method
+        first_arg_is_self
+        or first_arg_is_cls
+        or is_regular_method
         or is_decorated_cls_method
         or is_cls_method_from_meta_method
     ):
@@ -81,7 +95,7 @@ def _get_fn_argnames(fn: Callable) -> List[str]:
 def _handle_schema_error(
     decorator_name,
     fn: Callable,
-    schema: Union[DataFrameSchema, SeriesSchema],
+    schema: Union[DataFrameSchema, ComponentSchema],
     data_obj: Any,
     schema_error: errors.SchemaError,
 ) -> NoReturn:
@@ -95,16 +109,22 @@ def _handle_schema_error(
         checks.
     """
     raise _parse_schema_error(
-        decorator_name, fn, schema, data_obj, schema_error
+        decorator_name,
+        fn,
+        schema,
+        data_obj,
+        schema_error,
+        schema_error.reason_code,
     ) from schema_error
 
 
 def _parse_schema_error(
     decorator_name,
     fn: Callable,
-    schema: Union[DataFrameSchema, SeriesSchema],
+    schema: Union[DataFrameSchema, ComponentSchema],
     data_obj: Any,
     schema_error: errors.SchemaError,
+    reason_code: errors.SchemaErrorReason,
 ) -> NoReturn:
     """Parse schema validation error with decorator context.
 
@@ -112,6 +132,7 @@ def _parse_schema_error(
     :param schema: dataframe/series schema object
     :param arg_df: dataframe/series we are validating.
     :param schema_error: original exception.
+    :param reason_code: SchemaErrorReason associated with the error.
     :raises SchemaError: when ``DataFrame`` violates built-in or custom
         checks.
     """
@@ -126,6 +147,7 @@ def _parse_schema_error(
         failure_cases=schema_error.failure_cases,
         check=schema_error.check,
         check_index=schema_error.check_index,
+        reason_code=reason_code,
     )
 
 
@@ -198,73 +220,77 @@ def check_input(
 
     """
 
-    @wrapt.decorator
-    def _wrapper(
-        fn: Callable,
-        instance: Union[None, Any],
-        args: Tuple[Any, ...],
-        kwargs: Dict[str, Any],
-    ):
-        # pylint: disable=unused-argument
-        """Check pandas DataFrame or Series before calling the function.
+    def decorator(wrapped):
 
-        :param fn: check the DataFrame or Series input of this function
-        :param instance: the object to which the wrapped function was bound
-            when it was called. Only applies to methods.
-        :param args: the list of positional arguments supplied when the
-            decorated function was called.
-        :param kwargs: the dictionary of keyword arguments supplied when the
-            decorated function was called.
-        """
-        args = list(args)
-        validate_args = (head, tail, sample, random_state, lazy, inplace)
-        if isinstance(obj_getter, int):
-            try:
-                args[obj_getter] = schema.validate(args[obj_getter])
-            except IndexError as exc:
-                raise IndexError(
-                    f"error in check_input decorator of function '{fn.__name__}': the "
-                    f"index '{obj_getter}' was supplied to the check but this "
-                    f"function accepts '{len(_get_fn_argnames(fn))}' arguments, so the maximum "
-                    f"index is 'max(0, len(_get_fn_argnames(fn)) - 1)'. The full error is: '{exc}'"
-                ) from exc
-        elif isinstance(obj_getter, str):
-            if obj_getter in kwargs:
-                kwargs[obj_getter] = schema.validate(
-                    kwargs[obj_getter], *validate_args
-                )
+        @functools.wraps(wrapped)
+        def _wrapper(*args, **kwargs):
+            """Check pandas DataFrame or Series before calling the function."""
+            # pylint: disable=too-many-branches
+            args = list(args)
+            validate_args = (head, tail, sample, random_state, lazy, inplace)
+
+            sig = inspect.signature(_unwrap_fn(wrapped))
+            is_method = [*sig.parameters][0] in ("self", "cls")
+            if is_method and len(args) == len(sig.parameters) - 1:
+                pos_args = sig.bind_partial(None, *args).arguments
             else:
-                arg_spec_args = _get_fn_argnames(fn)
-                args_dict = OrderedDict(zip(arg_spec_args, args))
-                args_dict[obj_getter] = schema.validate(
-                    args_dict[obj_getter], *validate_args
-                )
-                args = list(args_dict.values())
-        elif obj_getter is None and args:
-            try:
-                args[0] = schema.validate(args[0], *validate_args)
-            except errors.SchemaError as e:
-                _handle_schema_error("check_input", fn, schema, args[0], e)
-        elif obj_getter is None and kwargs:
-            # get the first key in the same order specified in the
-            # function argument.
-            args_names = _get_fn_argnames(fn)
+                pos_args = sig.bind_partial(*args).arguments
 
-            try:
-                kwargs[args_names[0]] = schema.validate(
-                    kwargs[args_names[0]], *validate_args
-                )
-            except errors.SchemaError as e:
-                _handle_schema_error(
-                    "check_input", fn, schema, kwargs[args_names[0]], e
-                )
-        else:
-            raise TypeError(
-                f"obj_getter is unrecognized type: {type(obj_getter)}"
-            )
-        return fn(*args, **kwargs)
+            if isinstance(obj_getter, int):
+                try:
+                    arg_idx = obj_getter + 1 if is_method else obj_getter
+                    args[arg_idx] = schema.validate(args[arg_idx])
+                except IndexError as exc:
+                    raise IndexError(
+                        f"error in check_input decorator of function '{wrapped.__name__}': the "
+                        f"index '{obj_getter}' was supplied to the check but this "
+                        f"function accepts '{len(_get_fn_argnames(wrapped))}' arguments, so the maximum "
+                        f"index is 'max(0, len(_get_fn_argnames(fn)) - 1)'. The full error is: '{exc}'"
+                    ) from exc
+            elif isinstance(obj_getter, str):
+                if obj_getter in kwargs:
+                    kwargs[obj_getter] = schema.validate(
+                        kwargs[obj_getter], *validate_args
+                    )
+                else:
+                    arg_spec_args = _get_fn_argnames(wrapped)
+                    pos_args[obj_getter] = schema.validate(
+                        pos_args[obj_getter], *validate_args
+                    )
+                    args = list(pos_args.values())
+            elif obj_getter is None:
+                try:
+                    _fn = _unwrap_fn(wrapped)
+                    obj_arg_name, *_ = _get_fn_argnames(wrapped)
+                    arg_spec_args = inspect.getfullargspec(_fn).args
 
-    return _wrapper
+                    arg_idx = arg_spec_args.index(obj_arg_name)
+
+                    if obj_arg_name in kwargs:
+                        obj = kwargs[obj_arg_name]
+                        kwargs[obj_arg_name] = schema.validate(
+                            obj, *validate_args
+                        )
+                    elif obj_arg_name in pos_args:
+                        obj = args[arg_idx]
+                        args[arg_idx] = schema.validate(obj, *validate_args)
+                    else:
+                        raise ValueError(
+                            f"argument {obj_arg_name} not found in args or kwargs"
+                        )
+                except errors.SchemaError as e:
+                    _handle_schema_error(
+                        "check_input", wrapped, schema, obj, e
+                    )
+            else:
+                raise TypeError(
+                    f"obj_getter is unrecognized type: {type(obj_getter)}"
+                )
+            return wrapped(*args, **kwargs)
+
+        return _wrapper
+
+    return decorator
 
 
 def check_output(
@@ -344,7 +370,7 @@ def check_output(
     # pylint: disable=too-many-boolean-expressions
     if callable(obj_getter) and (
         schema.coerce
-        or (schema.index is not None and schema.index.coerce)
+        or (schema.index is not None and schema.index.coerce)  # type: ignore[union-attr]
         or (
             isinstance(schema, DataFrameSchema)
             and any(col.coerce for col in schema.columns.values())
@@ -382,50 +408,43 @@ def check_output(
 
         raise TypeError(f"obj_getter is unrecognized type: {type(obj_getter)}")
 
-    @wrapt.decorator
-    def _wrapper(
-        fn: Callable,
-        instance: Union[None, Any],
-        args: Tuple[Any, ...],
-        kwargs: Dict[str, Any],
-    ):
-        # pylint: disable=unused-argument
-        """Check pandas DataFrame or Series before calling the function.
+    def decorator(wrapped):
 
-        :param fn: check the DataFrame or Series output of this function
-        :param instance: the object to which the wrapped function was bound
-            when it was called. Only applies to methods.
-        :param args: the list of positional arguments supplied when the
-            decorated function was called.
-        :param kwargs: the dictionary of keyword arguments supplied when the
-            decorated function was called.
-        """
-        if inspect.iscoroutinefunction(fn):
+        @functools.wraps(wrapped)
+        def _wrapper(*args, **kwargs):
+            """Check pandas DataFrame or Series before calling the function."""
+            args = list(args)
+            _fn = _unwrap_fn(wrapped)
 
-            async def aio_wrapper():
-                res = await fn(*args, **kwargs)
-                validate(res, fn)
-                return res
+            if inspect.iscoroutinefunction(_fn):
 
-            return aio_wrapper()
-        else:
-            out = fn(*args, **kwargs)
-            return validate(out, fn)
+                async def aio_wrapper():
+                    res = await wrapped(*args, **kwargs)
+                    validate(res, wrapped)
+                    return res
 
-    return _wrapper
+                return aio_wrapper()
+            else:
+                out = wrapped(*args, **kwargs)
+                return validate(out, wrapped)
+
+        return _wrapper
+
+    return decorator
 
 
 def check_io(
-    head: int = None,
-    tail: int = None,
-    sample: int = None,
-    random_state: int = None,
+    head: Optional[int] = None,
+    tail: Optional[int] = None,
+    sample: Optional[int] = None,
+    random_state: Optional[int] = None,
     lazy: bool = False,
     inplace: bool = False,
     out: Union[
         Schemas,
         Tuple[OutputGetter, Schemas],
         List[Tuple[OutputGetter, Schemas]],
+        None,
     ] = None,
     **inputs: Schemas,
 ) -> Callable[[F], F]:
@@ -433,6 +452,7 @@ def check_io(
 
     See :ref:`here<decorators>` for more usage details.
 
+    :param wrapped: the function to decorate.
     :param head: validate the first n rows. Rows overlapping with `tail` or
         `sample` are de-duplicated.
     :param tail: validate the last n rows. Rows overlapping with `head` or
@@ -456,55 +476,55 @@ def check_io(
         data structure referenced by the argument name.
     :returns: wrapped function
     """
+
     check_args = (head, tail, sample, random_state, lazy, inplace)
 
-    @wrapt.decorator
-    def _wrapper(
-        fn: Callable,
-        instance: Union[None, Any],  # pylint: disable=unused-argument
-        args: Tuple[Any, ...],
-        kwargs: Dict[str, Any],
-    ):
-        """Check pandas DataFrame or Series before calling the function.
+    def decorator(wrapped):
 
-        :param fn: check the DataFrame or Series output of this function
-        :param instance: the object to which the wrapped function was bound
-            when it was called. Only applies to methods.
-        :param args: the list of positional arguments supplied when the
-            decorated function was called.
-        :param kwargs: the dictionary of keyword arguments supplied when the
-            decorated function was called.
-        """
-        out_schemas = out
-        if isinstance(out, list):
+        @functools.wraps(wrapped)
+        def _wrapper(*args, **kwargs):
+            """Check pandas DataFrame or Series before calling the function.
+
+            :param fn: check the DataFrame or Series output of this function
+            :param instance: the object to which the wrapped function was bound
+                when it was called. Only applies to methods.
+            :param args: the list of positional arguments supplied when the
+                decorated function was called.
+            :param kwargs: the dictionary of keyword arguments supplied when the
+                decorated function was called.
+            """
             out_schemas = out
-        elif isinstance(out, (DataFrameSchema, SeriesSchema)):
-            out_schemas = [(None, out)]  # type: ignore
-        elif isinstance(out, tuple):
-            out_schemas = [out]
-        elif out is None:
-            out_schemas = []
-        else:
-            raise TypeError(
-                f"type of out argument not recognized: {type(out)}"
-            )
+            if isinstance(out, list):
+                out_schemas = out
+            elif isinstance(out, (DataFrameSchema, ComponentSchema)):
+                out_schemas = [(None, out)]  # type: ignore
+            elif isinstance(out, tuple):
+                out_schemas = [out]
+            elif out is None:
+                out_schemas = []
+            else:
+                raise TypeError(
+                    f"type of out argument not recognized: {type(out)}"
+                )
 
-        wrapped_fn = fn
-        for input_getter, input_schema in inputs.items():
+            wrapped_fn = wrapped
+            for input_getter, input_schema in inputs.items():
+                # pylint: disable=no-value-for-parameter
+                wrapped_fn = check_input(
+                    input_schema, input_getter, *check_args  # type: ignore
+                )(wrapped_fn)
+
             # pylint: disable=no-value-for-parameter
-            wrapped_fn = check_input(
-                input_schema, input_getter, *check_args  # type: ignore
-            )(wrapped_fn)
+            for out_getter, out_schema in out_schemas:  # type: ignore
+                wrapped_fn = check_output(out_schema, out_getter, *check_args)(
+                    wrapped_fn
+                )
 
-        # pylint: disable=no-value-for-parameter
-        for out_getter, out_schema in out_schemas:  # type: ignore
-            wrapped_fn = check_output(out_schema, out_getter, *check_args)(
-                wrapped_fn
-            )
+            return wrapped_fn(*args, **kwargs)
 
-        return wrapped_fn(*args, **kwargs)
+        return _wrapper
 
-    return _wrapper
+    return decorator
 
 
 @overload
@@ -518,8 +538,7 @@ def check_types(
     random_state: Optional[int] = None,
     lazy: bool = False,
     inplace: bool = False,
-) -> F:
-    ...  # pragma: no cover
+) -> F: ...  # pragma: no cover
 
 
 @overload
@@ -533,8 +552,7 @@ def check_types(
     random_state: Optional[int] = None,
     lazy: bool = False,
     inplace: bool = False,
-) -> Callable[[F], F]:
-    ...  # pragma: no cover
+) -> Callable[[F], F]: ...  # pragma: no cover
 
 
 def check_types(
@@ -551,7 +569,7 @@ def check_types(
     # pylint: disable=too-many-statements
     """Validate function inputs and output based on type annotations.
 
-    See the :ref:`User Guide <dataframe_models>` for more.
+    See the :ref:`User Guide <dataframe-models>` for more.
 
     :param wrapped: the function to decorate.
     :param with_pydantic: use ``pydantic.validate_arguments`` to validate
@@ -585,7 +603,9 @@ def check_types(
     # Front-load annotation parsing
     annotated_schema_models: Dict[
         str,
-        Iterable[Tuple[Union[SchemaModel, None], Union[AnnotationInfo, None]]],
+        Iterable[
+            Tuple[Union[DataFrameModel, None], Union[AnnotationInfo, None]]
+        ],
     ] = {}
     for arg_name_, annotation in typing.get_type_hints(wrapped).items():
         annotation_info = AnnotationInfo(annotation)
@@ -598,14 +618,16 @@ def check_types(
                     if not sub_annotation_info.is_generic_df:
                         continue
 
-                    schema_model = cast(SchemaModel, sub_annotation_info.arg)
+                    schema_model = cast(
+                        DataFrameModel, sub_annotation_info.arg
+                    )
                     annotation_model_pairs.append(
                         (schema_model, sub_annotation_info)
                     )
             else:
                 continue
         else:
-            schema_model = cast(SchemaModel, annotation_info.arg)
+            schema_model = cast(DataFrameModel, annotation_info.arg)
             annotation_model_pairs = [(schema_model, annotation_info)]
 
         annotated_schema_models[arg_name_] = annotation_model_pairs
@@ -622,7 +644,7 @@ def check_types(
         if not annotation_model_pairs:
             return arg_value
 
-        error_handler = SchemaErrorHandler(lazy=True)
+        error_handler = ErrorHandler(lazy=True)
         for schema_model, annotation_info in annotation_model_pairs:
             if schema_model is None:
                 return arg_value
@@ -650,9 +672,10 @@ def check_types(
                     return arg_value
 
                 if (
-                    arg_value.pandera.schema is None
-                    # don't re-validate a dataframe that contains the same exact
-                    # schema
+                    not hasattr(arg_value, "pandera")
+                    or arg_value.pandera.schema is None
+                    # don't re-validate a dataframe that contains the same
+                    # exact schema
                     or arg_value.pandera.schema != schema
                 ):
                     try:
@@ -667,12 +690,20 @@ def check_types(
                         )
                     except errors.SchemaError as e:
                         error_handler.collect_error(
+                            validation_type(
+                                errors.SchemaErrorReason.INVALID_TYPE
+                            ),
                             errors.SchemaErrorReason.INVALID_TYPE,
                             _parse_schema_error(
-                                "check_types", wrapped, schema, arg_value, e
+                                "check_types",
+                                wrapped,
+                                schema,
+                                arg_value,
+                                e,
+                                errors.SchemaErrorReason.INVALID_TYPE,
                             ),
                         )
-                        continue
+                        continue  # pylint: disable=unreachable
 
                 if data_container_type and config and config.to_format:
                     arg_value = data_container_type.to_format(
@@ -681,84 +712,131 @@ def check_types(
 
                 return arg_value
 
-        if error_handler.collected_errors:
-            if len(error_handler.collected_errors) == 1:
-                raise error_handler.collected_errors[0]  # type: ignore[misc]
+        if error_handler.schema_errors:
+            if len(error_handler.schema_errors) == 1:
+                raise error_handler.schema_errors[0]
+
             raise errors.SchemaErrors(
                 schema=schema,
-                schema_errors=error_handler.collected_errors,
+                schema_errors=(
+                    error_handler.schema_errors
+                    if isinstance(arg_value, pd.DataFrame)
+                    else error_handler.collect_errors  # type: ignore
+                ),
                 data=arg_value,
             )
 
     sig = inspect.signature(wrapped)
 
-    def validate_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            arg_name: _check_arg(arg_name, arg_value)
-            for arg_name, arg_value in arguments.items()
-        }
+    def validate_args(
+        named_arguments: Dict[str, Any], arguments: Tuple[Any, ...]
+    ) -> List[Any]:
+        """
+        Validates schemas of both explicit and *args-like function arguments.
+
+        :param named_arguments: Bundled function arguments. Organized as key-value pairs of the
+            argument name and value. *args-like arguments are bundled into a single tuple.
+            Example: OrderedDict({'arg1': 1, 'arg2': 2, 'star_args': (3, 4, 5)})
+        :param arguments: Unpacked function arguments, as written in the function call.
+            Example: (1, 2, 3, 4, 5)
+        :return: List of validated function arguments.
+        """
+
+        # Check for an '*args'-like argument
+        if len(arguments) > len(named_arguments):
+            (
+                star_args_name,
+                star_args_values,
+            ) = named_arguments.popitem()  # *args is the last item
+
+            star_args_tuple = (
+                _check_arg(star_args_name, arg_value)
+                for arg_value in star_args_values
+            )
+
+            explicit_args_tuple = (
+                _check_arg(arg_name, arg_value)
+                for arg_name, arg_value in named_arguments.items()
+            )
+
+            return list((*explicit_args_tuple, *star_args_tuple))
+
+        else:
+            return list(
+                _check_arg(arg_name, arg_value)
+                for arg_name, arg_value in named_arguments.items()
+            )
+
+    def validate_kwargs(
+        named_kwargs: Dict[str, Any], kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Validates schemas of both explicit and **kwargs-like function arguments.
+
+        :param named_kwargs: Bundled function keyword arguments. Organized as key-value pairs of
+            the keyword argument name and value. **kwargs-like arguments are bundled into a single
+            dictionary.
+            Example: OrderedDict({'kwarg1': 1, 'kwarg2': 2, 'star_kwargs': {'kwarg3': 3, 'kwarg4': 4}})
+        :param kwargs: Unpacked function keyword arguments, as written in the function call.
+            Example: {'kwarg1': 1, 'kwarg2': 2, 'kwarg3': 3, 'kwarg4': 4}
+        :return: list of validated function keyword arguments.
+        """
+
+        # Check for an '**kwargs'-like argument
+        if kwargs.keys() != named_kwargs.keys():
+            (
+                star_kwargs_name,
+                star_kwargs_dict,
+            ) = named_kwargs.popitem()  # **kwargs is the last item
+
+            explicit_kwargs_dict = {
+                arg_name: _check_arg(arg_name, arg_value)
+                for arg_name, arg_value in named_kwargs.items()
+            }
+
+            star_kwargs_dict = {
+                arg_name: _check_arg(star_kwargs_name, arg_value)
+                for arg_name, arg_value in star_kwargs_dict.items()
+            }
+
+            return {**explicit_kwargs_dict, **star_kwargs_dict}
+
+        else:
+            return {
+                arg_name: _check_arg(arg_name, arg_value)
+                for arg_name, arg_value in named_kwargs.items()
+            }
 
     def validate_inputs(
-        instance: Optional[Any],
         args: Tuple[Any, ...],
         kwargs: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        if instance is not None:
-            # If the wrapped function is a method -> add "self" as the first positional arg
-            args = (instance, *args)
-
-        validated_pos = validate_args(sig.bind_partial(*args).arguments)
-        validated_kwd = validate_args(sig.bind_partial(**kwargs).arguments)
-
-        if instance is not None:
-            # If the decorated func is a method, "wrapped" is a bound method
-            # -> remove "self" before passing positional args through
-            first_pos_arg = list(sig.parameters)[0]
-            del validated_pos[first_pos_arg]
-
+    ) -> Tuple[List[Any], Dict[str, Any]]:
+        validated_pos = validate_args(sig.bind_partial(*args).arguments, args)
+        validated_kwd = validate_kwargs(
+            sig.bind_partial(**kwargs).arguments, kwargs
+        )
         return validated_pos, validated_kwd
 
-    if inspect.iscoroutinefunction(wrapped):
+    if inspect.iscoroutinefunction(_unwrap_fn(wrapped)):
 
-        @wrapt.decorator
-        async def _wrapper(
-            wrapped_: Callable,
-            instance: Optional[Any],
-            args: Tuple[Any, ...],
-            kwargs: Dict[str, Any],
-        ):
+        @functools.wraps(wrapped)
+        async def _wrapper(*args, **kwargs):
             if with_pydantic:
-                out = await validate_arguments(wrapped_)(*args, **kwargs)
+                out = await validate_arguments(wrapped)(*args, **kwargs)
             else:
-                validated_pos, validated_kwd = validate_inputs(
-                    instance, args, kwargs
-                )
-                out = await wrapped_(*validated_pos.values(), **validated_kwd)
+                validated_pos, validated_kwd = validate_inputs(args, kwargs)
+                out = await wrapped(*validated_pos, **validated_kwd)
             return _check_arg("return", out)
 
     else:
 
-        @wrapt.decorator
-        def _wrapper(
-            wrapped_: Callable,
-            instance: Optional[Any],
-            args: Tuple[Any, ...],
-            kwargs: Dict[str, Any],
-        ):
+        @functools.wraps(wrapped)
+        def _wrapper(*args, **kwargs):
             if with_pydantic:
-                out = validate_arguments(wrapped_)(*args, **kwargs)
+                out = validate_arguments(wrapped)(*args, **kwargs)
             else:
-                validated_pos, validated_kwd = validate_inputs(
-                    instance, args, kwargs
-                )
-                out = wrapped_(*validated_pos.values(), **validated_kwd)
+                validated_pos, validated_kwd = validate_inputs(args, kwargs)
+                out = wrapped(*validated_pos, **validated_kwd)
             return _check_arg("return", out)
 
-    wrapped_fn = _wrapper(wrapped)  # pylint:disable=no-value-for-parameter
-
-    # The wrapt.decorator function returns a FunctionWrapper, which
-    # exposes an __iter__ method that causes the function to be recognized as
-    # an iterable. This causes unintended downstream issues, see for example:
-    # https://github.com/unionai-oss/pandera/issues/1021
-    wrapped_fn.__iter__ = None
-    return wrapped_fn
+    return _wrapper

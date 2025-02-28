@@ -6,22 +6,34 @@ import copy
 import os
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Optional,
+    Type,
+    Union,
+    cast,
+    overload,
+)
 
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.types import StructField, StructType
 
 from pandera import errors
-from pandera.config import CONFIG
+from pandera.api.base.error_handler import ErrorHandler
 from pandera.api.base.schema import BaseSchema
+from pandera.api.base.types import StrictType
 from pandera.api.checks import Check
-from pandera.api.pyspark.error_handler import ErrorHandler
-from pandera.api.pyspark.types import (
-    CheckList,
-    PySparkDtypeInputTypes,
-    StrictType,
-)
+from pandera.api.pyspark.types import CheckList, PySparkDtypeInputTypes
+from pandera.backends.pyspark.register import register_pyspark_backends
+from pandera.config import get_config_context
 from pandera.dtypes import DataType, UniqueSettings
 from pandera.engines import pyspark_engine
+
+if TYPE_CHECKING:
+    import pandera.api.pyspark.components
 
 N_INDENT_SPACES = 4
 
@@ -32,7 +44,7 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
     def __init__(
         self,
         columns: Optional[  # type: ignore [name-defined]
-            Dict[Any, "pandera.api.pyspark.components.Column"]  # type: ignore [name-defined]
+            Dict[Any, pandera.api.pyspark.components.Column]  # type: ignore [name-defined]
         ] = None,
         checks: Optional[CheckList] = None,
         dtype: PySparkDtypeInputTypes = None,
@@ -130,7 +142,7 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
             metadata=metadata,
         )
 
-        self.columns: Dict[Any, "pandera.api.pyspark.components.Column"] = (  # type: ignore [name-defined]
+        self.columns: Dict[Any, pandera.api.pyspark.components.Column] = (  # type: ignore [name-defined]
             {} if columns is None else columns
         )
 
@@ -147,14 +159,15 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
         self.strict: Union[bool, str] = strict
         self._coerce = coerce
         self.ordered = ordered
-        self._unique = unique
+        self._unique = [unique] if isinstance(unique, str) else unique
         self.report_duplicates = report_duplicates
         self.unique_column_names = unique_column_names
 
-        # this attribute is not meant to be accessed by users and is explicitly
-        # set to True in the case that a schema is created by infer_schema.
-        self._IS_INFERRED = False
         self.metadata = metadata
+
+    @staticmethod
+    def register_default_backends(check_obj_cls: Type):
+        register_pyspark_backends()
 
     @property
     def coerce(self) -> bool:
@@ -177,15 +190,6 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
     def unique(self, value: Optional[Union[str, List[str]]]) -> None:
         """Set unique attribute."""
         self._unique = [value] if isinstance(value, str) else value
-
-    # the _is_inferred getter and setter methods are not public
-    @property
-    def _is_inferred(self) -> bool:
-        return self._IS_INFERRED
-
-    @_is_inferred.setter
-    def _is_inferred(self, value: bool) -> None:
-        self._IS_INFERRED = value
 
     @property
     def dtypes(self) -> Dict[str, DataType]:
@@ -234,9 +238,11 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
                 regex_dtype.update(
                     {
                         c: column.dtype
-                        for c in column.BACKEND.get_regex_columns(
+                        for c in column.get_backend(
+                            dataframe
+                        ).get_regex_columns(
                             column,
-                            dataframe.columns,
+                            dataframe,
                         )
                     }
                 )
@@ -324,8 +330,8 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
         >>> schema_withchecks.validate(df).take(2)
             [Row(product='Bread', price=9), Row(product='Butter', price=15)]
         """
-        if not CONFIG.validation_enabled:
-            return
+        if not get_config_context().validation_enabled:
+            return check_obj
         error_handler = ErrorHandler(lazy)
 
         return self._validate(
@@ -350,15 +356,6 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
         inplace: bool = False,
         error_handler: ErrorHandler = None,
     ):
-        if self._is_inferred:
-            warnings.warn(
-                f"This {type(self)} is an inferred schema that hasn't been "
-                "modified. It's recommended that you refine the schema "
-                "by calling `add_columns`, `remove_columns`, or "
-                "`update_columns` before using it to validate data.",
-                UserWarning,
-            )
-
         return self.get_backend(check_obj).validate(
             check_obj=check_obj,
             schema=self,
@@ -465,9 +462,7 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
             return NotImplemented
 
         def _compare_dict(obj):
-            return {
-                k: v for k, v in obj.__dict__.items() if k != "_IS_INFERRED"
-            }
+            return {k: v for k, v in obj.__dict__.items() if k}
 
         return _compare_dict(self) == _compare_dict(other)
 
@@ -476,7 +471,7 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
         yield cls._pydantic_validate
 
     @classmethod
-    def _pydantic_validate(cls, schema: Any) -> "DataFrameSchema":
+    def _pydantic_validate(cls, schema: Any) -> DataFrameSchema:
         """Verify that the input is a compatible DataFrameSchema."""
         if not isinstance(schema, cls):  # type: ignore
             raise TypeError(f"{schema} is not a {cls}.")
@@ -487,7 +482,7 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
     # Schema IO Methods #
     #####################
 
-    def to_script(self, fp: Union[str, Path] = None) -> "DataFrameSchema":
+    def to_script(self, fp: Union[str, Path] = None) -> DataFrameSchema:
         """Create DataFrameSchema from yaml file.
 
         :param path: str, Path to write script
@@ -499,7 +494,7 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
         return pandera.io.to_script(self, fp)
 
     @classmethod
-    def from_yaml(cls, yaml_schema) -> "DataFrameSchema":
+    def from_yaml(cls, yaml_schema) -> DataFrameSchema:
         """Create DataFrameSchema from yaml file.
 
         :param yaml_schema: str, Path to yaml schema, or serialized yaml
@@ -510,14 +505,6 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
         import pandera.io
 
         return pandera.io.from_yaml(yaml_schema)
-
-    @overload
-    def to_yaml(self, stream: None = None) -> str:  # pragma: no cover
-        ...
-
-    @overload
-    def to_yaml(self, stream: os.PathLike) -> None:  # pragma: no cover
-        ...
 
     def to_yaml(self, stream: Optional[os.PathLike] = None) -> Optional[str]:
         """Write DataFrameSchema to yaml file.
@@ -531,7 +518,7 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
         return pandera.io.to_yaml(self, stream=stream)
 
     @classmethod
-    def from_json(cls, source) -> "DataFrameSchema":
+    def from_json(cls, source) -> DataFrameSchema:
         """Create DataFrameSchema from json file.
 
         :param source: str, Path to json schema, or serialized yaml
@@ -568,9 +555,37 @@ class DataFrameSchema(BaseSchema):  # pylint: disable=too-many-public-methods
 
         return pandera.io.to_json(self, target, **kwargs)
 
+    def to_structtype(self) -> StructType:
+        """Recover fields of DataFrameSchema as a Pyspark StructType object.
+
+        As the output of this method will be used to specify a read schema in Pyspark
+            (avoiding automatic schema inference), the False `nullable` properties are
+            just ignored, as this check will be executed by the Pandera validations
+            after a dataset is read.
+
+        :returns: StructType object with current schema fields.
+        """
+        fields = [
+            StructField(column, self.columns[column].dtype.type, True)
+            for column in self.columns
+        ]
+        return StructType(fields)
+
+    def to_ddl(self) -> str:
+        """Recover fields of DataFrameSchema as a Pyspark DDL string.
+
+        :returns: String with current schema fields, in compact DDL format.
+        """
+        # `StructType.toDDL()` is only available in internal java classes
+        spark = SparkSession.builder.getOrCreate()
+        # Create a base dataframe from where we access underlying Java classes
+        empty_df_with_schema = spark.createDataFrame([], self.to_structtype())
+
+        return empty_df_with_schema._jdf.schema().toDDL()
+
 
 def _validate_columns(
-    column_dict: dict[Any, "pandera.api.pyspark.components.Column"],  # type: ignore [name-defined]
+    column_dict: dict[Any, pandera.api.pyspark.components.Column],  # type: ignore [name-defined]
 ) -> None:
     for column_name, column in column_dict.items():
         for check in column.checks:
@@ -588,8 +603,8 @@ def _validate_columns(
 
 
 def _columns_renamed(
-    columns: dict[Any, "pandera.api.pyspark.components.Column"],  # type: ignore [name-defined]
-) -> dict[Any, "pandera.api.pyspark.components.Column"]:  # type: ignore [name-defined]
+    columns: dict[Any, pandera.api.pyspark.components.Column],  # type: ignore [name-defined]
+) -> dict[Any, pandera.api.pyspark.components.Column]:  # type: ignore [name-defined]
     def renamed(column, new_name):
         column = copy.deepcopy(column)
         column.set_name(new_name)

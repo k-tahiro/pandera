@@ -27,14 +27,14 @@
 [![PyPI pyversions](https://img.shields.io/pypi/pyversions/pandera.svg?style=for-the-badge)](https://pypi.python.org/pypi/pandera/)
 [![DOI](https://img.shields.io/badge/DOI-10.5281/zenodo.3385265-blue?style=for-the-badge)](https://doi.org/10.5281/zenodo.3385265)
 [![asv](http://img.shields.io/badge/benchmarked%20by-asv-green.svg?style=for-the-badge)](https://pandera-dev.github.io/pandera-asv-logs/)
-[![Downloads](https://img.shields.io/pypi/dm/pandera?style=for-the-badge&color=blue)](https://pepy.tech/project/pandera)
-[![Downloads](https://img.shields.io/badge/dynamic/json?style=for-the-badge&label=total%20downloads&query=%24.total_downloads&url=https%3A%2F%2Fapi.pepy.tech%2Fapi%2Fv2%2Fprojects%2Fpandera)](https://pepy.tech/project/pandera)
+[![Monthly Downloads](https://img.shields.io/pypi/dm/pandera?style=for-the-badge&color=blue)](https://pepy.tech/project/pandera)
+[![Total Downloads](https://img.shields.io/pepy/dt/pandera?style=for-the-badge&color=blue)](https://pepy.tech/project/pandera)
 [![Conda Downloads](https://img.shields.io/conda/dn/conda-forge/pandera?style=for-the-badge)](https://anaconda.org/conda-forge/pandera)
 [![Discord](https://img.shields.io/badge/discord-chat-purple?color=%235765F2&label=discord&logo=discord&style=for-the-badge)](https://discord.gg/vyanhWuaKB)
 
-`pandera` provides a flexible and expressive API for performing data
-validation on dataframe-like objects to make data processing pipelines more
-readable and robust.
+`pandera` is a [Union.ai](https://union.ai/blog-post/pandera-joins-union-ai) open
+source project that provides a flexible and expressive API for performing data
+validation on dataframe-like objects to make data processing pipelines more readable and robust.
 
 Dataframes contain information that `pandera` explicitly validates at runtime.
 This is useful in production-critical or reproducible research settings. With
@@ -42,12 +42,15 @@ This is useful in production-critical or reproducible research settings. With
 
 1. Define a schema once and use it to validate
    [different dataframe types](https://pandera.readthedocs.io/en/stable/supported_libraries.html)
-   including [pandas](http://pandas.pydata.org), [dask](https://dask.org),
-   [modin](https://modin.readthedocs.io/), and [pyspark](https://spark.apache.org/docs/3.2.0/api/python/user_guide/pandas_on_spark/index.html).
+   including [pandas](http://pandas.pydata.org), [polars](https://docs.pola.rs/),
+   [dask](https://dask.org), [modin](https://modin.readthedocs.io/),
+   and [pyspark](https://spark.apache.org/docs/3.2.0/api/python/user_guide/pandas_on_spark/index.html).
 1. [Check](https://pandera.readthedocs.io/en/stable/checks.html) the types and
    properties of columns in a `DataFrame` or values in a `Series`.
 1. Perform more complex statistical validation like
    [hypothesis testing](https://pandera.readthedocs.io/en/stable/hypothesis.html#hypothesis).
+1. [Parse](https://pandera.readthedocs.io/en/stable/parsers.html) data to standardize
+   the preprocessing steps needed to produce valid data.
 1. Seamlessly integrate with existing data analysis/processing pipelines
    via [function decorators](https://pandera.readthedocs.io/en/stable/decorators.html#decorators).
 1. Define dataframe models with the
@@ -63,7 +66,7 @@ This is useful in production-critical or reproducible research settings. With
 
 ## Documentation
 
-The official documentation is hosted on ReadTheDocs: https://pandera.readthedocs.io
+The official documentation is hosted here: https://pandera.readthedocs.io
 
 
 ## Install
@@ -89,17 +92,18 @@ Installing additional functionality:
 <summary><i>pip</i></summary>
 
 ```bash
-pip install pandera[hypotheses]  # hypothesis checks
-pip install pandera[io]          # yaml/script schema io utilities
-pip install pandera[strategies]  # data synthesis strategies
-pip install pandera[mypy]        # enable static type-linting of pandas
-pip install pandera[fastapi]     # fastapi integration
-pip install pandera[dask]        # validate dask dataframes
-pip install pandera[pyspark]     # validate pyspark dataframes
-pip install pandera[modin]       # validate modin dataframes
-pip install pandera[modin-ray]   # validate modin dataframes with ray
-pip install pandera[modin-dask]  # validate modin dataframes with dask
-pip install pandera[geopandas]   # validate geopandas geodataframes
+pip install 'pandera[hypotheses]' # hypothesis checks
+pip install 'pandera[io]'         # yaml/script schema io utilities
+pip install 'pandera[strategies]' # data synthesis strategies
+pip install 'pandera[mypy]'       # enable static type-linting of pandas
+pip install 'pandera[fastapi]'    # fastapi integration
+pip install 'pandera[dask]'       # validate dask dataframes
+pip install 'pandera[pyspark]'    # validate pyspark dataframes
+pip install 'pandera[modin]'      # validate modin dataframes
+pip install 'pandera[modin-ray]'  # validate modin dataframes with ray
+pip install 'pandera[modin-dask]' # validate modin dataframes with dask
+pip install 'pandera[geopandas]'  # validate geopandas geodataframes
+pip install 'pandera[polars]'     # validate polars dataframes
 ```
 
 </details>
@@ -120,6 +124,7 @@ conda install -c conda-forge pandera-modin       # validate modin dataframes
 conda install -c conda-forge pandera-modin-ray   # validate modin dataframes with ray
 conda install -c conda-forge pandera-modin-dask  # validate modin dataframes with dask
 conda install -c conda-forge pandera-geopandas   # validate geopandas geodataframes
+conda install -c conda-forge pandera-polars      # validate polars dataframes
 ```
 
 </details>
@@ -191,7 +196,8 @@ Schema.validate(df)
 ```
 git clone https://github.com/pandera-dev/pandera.git
 cd pandera
-pip install -r requirements-dev.txt
+export PYTHON_VERSION=...  # specify desired python version
+pip install -r dev/requirements-${PYTHON_VERSION}.txt
 pip install -e .
 ```
 
@@ -241,30 +247,6 @@ page or reach out to the maintainers and pandera community on
 - Use schemas as generative contracts to [synthesize data](https://pandera.readthedocs.io/en/stable/data_synthesis_strategies.html) for unit testing.
 - [Schema inference](https://pandera.readthedocs.io/en/stable/schema_inference.html) allows you to bootstrap schemas from data.
 
-## Alternative Data Validation Libraries
-
-Here are a few other alternatives for validating Python data structures.
-
-**Generic Python object data validation**
-
-- [voloptuous](https://github.com/alecthomas/voluptuous)
-- [schema](https://github.com/keleshev/schema)
-
-**`pandas`-specific data validation**
-
-- [opulent-pandas](https://github.com/danielvdende/opulent-pandas)
-- [PandasSchema](https://github.com/TMiguelT/PandasSchema)
-- [pandas-validator](https://github.com/c-data/pandas-validator)
-- [table_enforcer](https://github.com/xguse/table_enforcer)
-- [dataenforce](https://github.com/CedricFR/dataenforce)
-- [strictly typed pandas](https://github.com/nanne-aben/strictly_typed_pandas)
-- [marshmallow-dataframe](https://github.com/facultyai/marshmallow-dataframe)
-
-**Other tools for data validation**
-
-- [great_expectations](https://github.com/great-expectations/great_expectations)
-- [frictionless schema](https://framework.frictionlessdata.io/docs/guides/framework/schema-guide/)
-
 ## How to Cite
 
 If you use `pandera` in the context of academic or industry research, please
@@ -292,4 +274,4 @@ consider citing the **paper** and/or **software package**.
 ## License and Credits
 
 `pandera` is licensed under the [MIT license](license.txt) and is written and
-maintained by Niels Bantilan (niels@pandera.ci)
+maintained by Niels Bantilan (niels@union.ai)

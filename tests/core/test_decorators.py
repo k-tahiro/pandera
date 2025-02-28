@@ -1,4 +1,6 @@
 """Testing the Decorators that check a functions input or output."""
+
+import pickle
 import typing
 from asyncio import AbstractEventLoop
 
@@ -9,12 +11,12 @@ import pytest
 from pandera import (
     Check,
     Column,
+    DataFrameModel,
     DataFrameSchema,
     DateTime,
     Field,
     Float,
     Int,
-    DataFrameModel,
     String,
     check_input,
     check_io,
@@ -29,7 +31,7 @@ try:
     # python 3.8+
     from typing import Literal  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover
-    from typing_extensions import Literal  # type: ignore[misc]
+    from typing_extensions import Literal  # type: ignore[assignment]
 
 
 def test_check_function_decorators() -> None:
@@ -264,7 +266,7 @@ def test_check_instance_method_decorator_error() -> None:
 
     with pytest.raises(
         errors.SchemaError,
-        match=r"^error in check_input decorator of function 'TestClass.test_method'",
+        match=r"^error in check_input decorator of function 'test_method'",
     ):
         test_instance = TestClass()
         test_instance.test_method(pd.DataFrame({"column2": ["a", "b", "c"]}))
@@ -344,6 +346,25 @@ def test_check_input_method_decorators() -> None:
     _assert_expectation(
         transformer.transform_secord_arg_with_dict_getter(None, dataframe)
     )
+
+
+class DfModel(DataFrameModel):
+    col: int
+
+
+# pylint: disable=unused-argument
+@check_input(DfModel.to_schema())
+def fn_with_check_input(data: DataFrame[DfModel], *, kwarg: bool = False):
+    return data
+
+
+def test_check_input_on_fn_with_kwarg():
+    """
+    That that a check_input correctly validates a function where the first arg
+    is the dataframe and the function has other kwargs.
+    """
+    df = pd.DataFrame({"col": [1]})
+    fn_with_check_input(df, kwarg=True)
 
 
 def test_check_io() -> None:
@@ -557,7 +578,7 @@ def test_check_types_arguments() -> None:
     ) -> DataFrame[OnlyZeroesSchema]:
         return pd.DataFrame({"a": [1, 1]})  # type: ignore
 
-    with pytest.raises(errors.SchemaErrors, match="Usage Tip"):
+    with pytest.raises(errors.SchemaErrors, match=r"DATA"):
         transform_lazy(df)  # type: ignore
 
 
@@ -775,13 +796,13 @@ def test_check_types_with_literal_type(arg_examples):
     """Test that using typing module types works with check_types"""
 
     for example in arg_examples:
-        arg_type = Literal[example]
+        arg_type = Literal[example]  # type: ignore
 
         @check_types
         def transform_with_literal(
             df: DataFrame[InSchema],
             # pylint: disable=unused-argument,cell-var-from-loop
-            arg: arg_type,
+            arg: arg_type,  # type: ignore
         ) -> DataFrame[OutSchema]:
             return df.assign(b=100)  # type: ignore
 
@@ -958,6 +979,122 @@ def test_check_types_non_dataframes() -> None:
     assert isinstance(str_val_pydantic, int)
 
 
+def test_check_types_star_args() -> None:
+    """Test to check_types for functions with *args arguments"""
+
+    @check_types
+    def get_len_star_args__int(
+        # pylint: disable=unused-argument
+        arg1: int,
+        *args: int,
+    ) -> int:
+        return len(args)
+
+    @check_types
+    def get_len_star_args__dataframe(
+        # pylint: disable=unused-argument
+        arg1: DataFrame[InSchema],
+        *args: DataFrame[InSchema],
+    ) -> int:
+        return len(args)
+
+    in_1 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_2 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_3 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_4_error = pd.DataFrame({"b": [1]}, index=["1"])
+
+    assert get_len_star_args__int(1, 2, 3) == 2
+    assert get_len_star_args__dataframe(in_1, in_2) == 1
+    assert get_len_star_args__dataframe(in_1, in_2, in_3) == 2
+
+    with pytest.raises(
+        errors.SchemaError, match="column 'a' not in dataframe"
+    ):
+        get_len_star_args__dataframe(in_1, in_2, in_4_error)
+
+
+def test_check_types_star_kwargs() -> None:
+    """Test to check_types for functions with **kwargs arguments"""
+
+    @check_types
+    def get_star_kwargs_keys_int(
+        # pylint: disable=unused-argument
+        kwarg1: int = 1,
+        **kwargs: int,
+    ) -> typing.List[str]:
+        return list(kwargs.keys())
+
+    @check_types
+    def get_star_kwargs_keys_dataframe(
+        # pylint: disable=unused-argument
+        kwarg1: typing.Optional[DataFrame[InSchema]] = None,
+        **kwargs: DataFrame[InSchema],
+    ) -> typing.List[str]:
+        return list(kwargs.keys())
+
+    in_1 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_2 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_3 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_4_error = pd.DataFrame({"b": [1]}, index=["1"])
+
+    int_kwargs_keys = get_star_kwargs_keys_int(kwarg1=1, kwarg2=2, kwarg3=3)
+    df_kwargs_keys_1 = get_star_kwargs_keys_dataframe(
+        kwarg1=in_1,
+        kwarg2=in_2,
+    )
+    df_kwargs_keys_2 = get_star_kwargs_keys_dataframe(
+        kwarg1=in_1, kwarg2=in_2, kwarg3=in_3
+    )
+
+    assert int_kwargs_keys == ["kwarg2", "kwarg3"]
+    assert df_kwargs_keys_1 == ["kwarg2"]
+    assert df_kwargs_keys_2 == ["kwarg2", "kwarg3"]
+
+    with pytest.raises(
+        errors.SchemaError, match="column 'a' not in dataframe"
+    ):
+        get_star_kwargs_keys_dataframe(
+            kwarg1=in_1, kwarg2=in_2, kwarg3=in_4_error
+        )
+
+
+def test_check_types_star_args_kwargs() -> None:
+    """Test to check_types for functions with both *args and **kwargs"""
+
+    @check_types
+    def star_args_kwargs(
+        arg1: DataFrame[InSchema],
+        *args: DataFrame[InSchema],
+        kwarg1: DataFrame[InSchema],
+        **kwargs: DataFrame[InSchema],
+    ):
+        return arg1, args, kwarg1, kwargs
+
+    in_1 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_2 = pd.DataFrame({"a": [1]}, index=["1"])
+    in_3 = pd.DataFrame({"a": [1]}, index=["1"])
+
+    expected_arg = in_1
+    expected_star_args = (in_2, in_3)
+    expected_kwarg = in_1
+    expected_star_kwargs = {"kwarg2": in_2, "kwarg3": in_3}
+
+    arg, star_args, kwarg, star_kwargs = star_args_kwargs(
+        in_1, in_2, in_3, kwarg1=in_1, kwarg2=in_2, kwarg3=in_3
+    )
+
+    pd.testing.assert_frame_equal(expected_arg, arg)
+    pd.testing.assert_frame_equal(expected_kwarg, kwarg)
+
+    for expected, actual in zip(expected_star_args, star_args):
+        pd.testing.assert_frame_equal(expected, actual)
+
+    for expected, actual in zip(
+        expected_star_kwargs.values(), star_kwargs.values()
+    ):
+        pd.testing.assert_frame_equal(expected, actual)
+
+
 def test_coroutines(event_loop: AbstractEventLoop) -> None:
     # pylint: disable=missing-class-docstring,too-few-public-methods,missing-function-docstring
     class Schema(DataFrameModel):
@@ -1056,3 +1193,28 @@ def test_coroutines(event_loop: AbstractEventLoop) -> None:
                 await coro(bad_df)
 
     event_loop.run_until_complete(check_coros())
+
+
+class Schema(DataFrameModel):
+    column1: Series[int]
+    column2: Series[float]
+    column3: Series[str]
+
+
+@check_types
+def process_data_and_check_types(df: DataFrame[Schema]) -> DataFrame[Schema]:
+    # Example processing: add a new column
+    return df
+
+
+def test_pickle_decorated_function(tmp_path):
+    path = tmp_path / "tmp.pkl"
+
+    with path.open("wb") as f:
+        pickle.dump(process_data_and_check_types, f)
+
+    with path.open("rb") as f:
+        _process_data_and_check_types = pickle.load(f)
+
+    # pylint: disable=comparison-with-callable
+    assert process_data_and_check_types == _process_data_and_check_types

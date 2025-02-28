@@ -1,30 +1,31 @@
 """Backend implementation for pandas schema components."""
+
 # pylint: disable=too-many-locals
 
 import traceback
-from copy import copy, deepcopy
+from copy import deepcopy
 from typing import Iterable, List, Optional, Union
 
 import numpy as np
 import pandas as pd
 
-from pandera.backends.base import CoreCheckResult
-from pandera.backends.pandas.array import ArraySchemaBackend
-from pandera.backends.pandas.container import DataFrameSchemaBackend
+from pandera.api.base.error_handler import ErrorHandler
 from pandera.api.pandas.types import (
     is_field,
     is_index,
     is_multiindex,
     is_table,
 )
-from pandera.backends.pandas.error_formatters import scalar_failure_case
-from pandera.error_handlers import SchemaErrorHandler
+from pandera.backends.base import CoreCheckResult
+from pandera.backends.pandas.array import ArraySchemaBackend
+from pandera.backends.pandas.container import DataFrameSchemaBackend
 from pandera.errors import (
-    SchemaError,
-    SchemaErrors,
-    SchemaErrorReason,
     SchemaDefinitionError,
+    SchemaError,
+    SchemaErrorReason,
+    SchemaErrors,
 )
+from pandera.validation_depth import validation_type
 
 
 class ColumnBackend(ArraySchemaBackend):
@@ -42,11 +43,12 @@ class ColumnBackend(ArraySchemaBackend):
         lazy: bool = False,
         inplace: bool = False,
     ) -> pd.DataFrame:
+        # pylint: disable=too-many-branches
         """Validation backend implementation for pandas dataframe columns.."""
         if not inplace:
             check_obj = check_obj.copy()
 
-        error_handler = SchemaErrorHandler(lazy=lazy)
+        error_handler = ErrorHandler(lazy=lazy)
 
         if getattr(schema, "drop_invalid_rows", False) and not lazy:
             raise SchemaDefinitionError(
@@ -60,14 +62,18 @@ class ColumnBackend(ArraySchemaBackend):
                 "column name is set to None. Pass the ``name`` argument when "
                 "initializing a Column object, or use the ``set_name`` "
                 "method.",
+                reason_code=SchemaErrorReason.INVALID_COLUMN_NAME,
             )
 
         def validate_column(check_obj, column_name, return_check_obj=False):
             try:
                 # pylint: disable=super-with-arguments
+                # make sure the schema component mutations are reverted after
+                # validation
+                _orig_name = schema.name
                 validated_check_obj = super(ColumnBackend, self).validate(
                     check_obj,
-                    copy(schema).set_name(column_name),
+                    schema.set_name(column_name),
                     head=head,
                     tail=tail,
                     sample=sample,
@@ -75,26 +81,35 @@ class ColumnBackend(ArraySchemaBackend):
                     lazy=lazy,
                     inplace=inplace,
                 )
+                # revert the schema component mutations
+                schema.name = _orig_name
 
                 if return_check_obj:
                     return validated_check_obj
 
-            except SchemaErrors as err:
-                for err in err.schema_errors:
+            except SchemaErrors as errs:
+                for err in errs.schema_errors:
+                    err.column_name = column_name
                     error_handler.collect_error(
-                        reason_code=None,
-                        schema_error=err,
+                        validation_type(err.reason_code), err.reason_code, err
                     )
             except SchemaError as err:
-                error_handler.collect_error(err.reason_code, err)
+                err.column_name = column_name
+                error_handler.collect_error(
+                    validation_type(err.reason_code), err.reason_code, err
+                )
 
         column_keys_to_check = (
-            self.get_regex_columns(schema, check_obj.columns)
+            self.get_regex_columns(schema, check_obj)
             if schema.regex
             else [schema.name]
         )
 
         for column_name in column_keys_to_check:
+            if pd.notna(schema.default):
+                check_obj[column_name] = check_obj[column_name].fillna(
+                    schema.default
+                )
             if schema.coerce:
                 try:
                     check_obj[column_name] = self.coerce_dtype(
@@ -102,40 +117,49 @@ class ColumnBackend(ArraySchemaBackend):
                         schema=schema,
                     )
                 except SchemaErrors as exc:
-                    error_handler.collect_errors(exc)
+                    error_handler.collect_errors(exc.schema_errors)
 
             if is_table(check_obj[column_name]):
                 for i in range(check_obj[column_name].shape[1]):
-                    validate_column(
-                        check_obj[column_name].iloc[:, [i]], column_name
+                    validated_column = validate_column(
+                        check_obj[column_name].iloc[:, [i]],
+                        column_name,
+                        return_check_obj=True,
                     )
+                    if schema.parsers:
+                        check_obj[column_name] = validated_column
             else:
                 if getattr(schema, "drop_invalid_rows", False):
-                    # replace the check_obj with the validated check_obj
+                    # replace the check_obj with the validated
                     check_obj = validate_column(
                         check_obj, column_name, return_check_obj=True
                     )
-                else:
-                    validate_column(check_obj, column_name)
+
+                validated_column = validate_column(
+                    check_obj,
+                    column_name,
+                    return_check_obj=True,
+                )
+                if schema.parsers:
+                    check_obj[column_name] = validated_column
 
         if lazy and error_handler.collected_errors:
             raise SchemaErrors(
                 schema=schema,
-                schema_errors=error_handler.collected_errors,
+                schema_errors=error_handler.schema_errors,
                 data=check_obj,
             )
 
         return check_obj
 
-    def get_regex_columns(
-        self, schema, columns: Union[pd.Index, pd.MultiIndex]
-    ) -> Iterable:
+    def get_regex_columns(self, schema, check_obj) -> Iterable:
         """Get matching column names based on regex column name pattern.
 
         :param schema: schema specification to use
         :param columns: columns to regex pattern match
         :returns: matchin columns
         """
+        columns = check_obj.columns
         if isinstance(schema.name, tuple):
             # handle MultiIndex case
             if len(schema.name) != columns.nlevels:
@@ -174,8 +198,9 @@ class ColumnBackend(ArraySchemaBackend):
                     "columns in the dataframe. Update the regex pattern so "
                     f"that it matches at least one column:\n{columns.tolist()}",
                 ),
-                failure_cases=scalar_failure_case(str(columns.tolist())),
+                failure_cases=str(columns.tolist()),
                 check=f"no_regex_column_match('{schema.name}')",
+                reason_code=SchemaErrorReason.INVALID_COLUMN_NAME,
             )
         # drop duplicates to account for potential duplicated columns in the
         # dataframe.
@@ -191,7 +216,7 @@ class ColumnBackend(ArraySchemaBackend):
         # pylint: disable=fixme
         # TODO: use singledispatchmethod here
         if is_field(check_obj) or is_index(check_obj):
-            return super(ColumnBackend, self).coerce_dtype(
+            return super().coerce_dtype(
                 check_obj,
                 schema=schema,
             )
@@ -240,7 +265,7 @@ class ColumnBackend(ArraySchemaBackend):
                         check_index=check_index,
                         reason_code=SchemaErrorReason.CHECK_ERROR,
                         message=msg,
-                        failure_cases=scalar_failure_case(err_str),
+                        failure_cases=err_str,
                         original_exc=err,
                     )
                 )
@@ -264,22 +289,27 @@ class IndexBackend(ArraySchemaBackend):
     ) -> Union[pd.DataFrame, pd.Series]:
         if is_multiindex(check_obj.index):
             raise SchemaError(
-                schema, check_obj, "Attempting to validate mismatch index"
+                schema,
+                check_obj,
+                "Attempting to validate mismatch index",
+                reason_code=SchemaErrorReason.MISMATCH_INDEX,
             )
+
+        error_handler = ErrorHandler(lazy)
 
         if schema.coerce:
-            check_obj.index = schema.coerce_dtype(check_obj.index)
-            obj_to_validate = schema.dtype.coerce(
-                check_obj.index.to_series().reset_index(drop=True)
-            )
-        else:
-            obj_to_validate = check_obj.index.to_series().reset_index(
-                drop=True
-            )
+            try:
+                check_obj.index = schema.coerce_dtype(check_obj.index)
+            except SchemaError as exc:
+                error_handler.collect_error(
+                    validation_type(exc.reason_code),
+                    exc.reason_code,
+                    exc,
+                )
 
-        assert is_field(
-            super().validate(
-                obj_to_validate,
+        try:
+            _validated_obj = super().validate(
+                check_obj.index.to_series().reset_index(drop=True),
                 schema,
                 head=head,
                 tail=tail,
@@ -287,8 +317,24 @@ class IndexBackend(ArraySchemaBackend):
                 random_state=random_state,
                 lazy=lazy,
                 inplace=inplace,
-            ),
-        )
+            )
+            assert is_field(_validated_obj)
+        except SchemaError as exc:
+            error_handler.collect_error(
+                validation_type(exc.reason_code),
+                exc.reason_code,
+                exc,
+            )
+        except SchemaErrors as exc:
+            error_handler.collect_errors(exc.schema_errors, exc)
+
+        if lazy and error_handler.collected_errors:
+            raise SchemaErrors(
+                schema=schema,
+                schema_errors=error_handler.schema_errors,
+                data=check_obj,
+            )
+
         return check_obj
 
 
@@ -312,7 +358,7 @@ class MultiIndexBackend(DataFrameSchemaBackend):
         if not schema.coerce:
             return check_obj
 
-        error_handler = SchemaErrorHandler(lazy=True)
+        error_handler = ErrorHandler(lazy=True)
 
         # construct MultiIndex with coerced data types
         coerced_multi_index = {}
@@ -334,14 +380,18 @@ class MultiIndexBackend(DataFrameSchemaBackend):
                         index_array = _index.coerce_dtype(index_array)
                     except SchemaError as err:
                         error_handler.collect_error(
-                            SchemaErrorReason.DATATYPE_COERCION, err
+                            validation_type(
+                                SchemaErrorReason.DATATYPE_COERCION
+                            ),
+                            SchemaErrorReason.DATATYPE_COERCION,
+                            err,
                         )
                 coerced_multi_index[index_level] = index_array
 
         if error_handler.collected_errors:
             raise SchemaErrors(
                 schema=schema,
-                schema_errors=error_handler.collected_errors,
+                schema_errors=error_handler.schema_errors,
                 data=check_obj,
             )
 
@@ -363,9 +413,11 @@ class MultiIndexBackend(DataFrameSchemaBackend):
                 # - For Pyspark only, use to_numpy(), with the effect of keeping the
                 #   bug open on this execution environment: At the time of writing, pyspark
                 #   v3.3.0 does not provide a working implementation of v.array
-                v.to_numpy()
-                if type(v).__module__.startswith("pyspark.pandas")
-                else v.array
+                (
+                    v.to_numpy()
+                    if type(v).__module__.startswith("pyspark.pandas")
+                    else v.array
+                )
                 for _, v in sorted(
                     coerced_multi_index.items(), key=lambda x: x[0]
                 )
@@ -449,16 +501,21 @@ class MultiIndexBackend(DataFrameSchemaBackend):
             # a more principled schema class hierarchy.
             schema_errors = []
             for schema_error in err.schema_errors:
+                if is_table(schema_error.failure_cases):
+                    failure_cases = schema_error.failure_cases.assign(
+                        column=schema_error.schema.name
+                    )
+                else:
+                    failure_cases = schema_error.failure_cases
                 schema_errors.append(
                     SchemaError(
                         schema,
                         check_obj,
                         schema_error.args[0],
-                        schema_error.failure_cases.assign(
-                            column=schema_error.schema.name
-                        ),
+                        failure_cases,
                         schema_error.check,
                         schema_error.check_index,
+                        reason_code=schema_error.reason_code,
                     )
                 )
 

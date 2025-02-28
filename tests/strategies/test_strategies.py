@@ -16,7 +16,7 @@ from pandera import strategies
 from pandera.api.checks import Check
 from pandera.api.extensions import register_check_statistics
 from pandera.dtypes import is_category, is_complex, is_float
-from pandera.engines import pandas_engine
+from pandera.engines import pandas_engine, geopandas_engine
 
 try:
     import hypothesis
@@ -30,21 +30,54 @@ else:
     HAS_HYPOTHESIS = True
 
 
-UNSUPPORTED_DTYPE_CLS: Set[Any] = set(
-    [
-        pandas_engine.Interval,
-        pandas_engine.Period,
-        pandas_engine.Sparse,
-        pandas_engine.PydanticModel,
-        pandas_engine.Decimal,
-        pandas_engine.Date,
-        pandas_engine.PythonDict,
-        pandas_engine.PythonList,
-        pandas_engine.PythonTuple,
-        pandas_engine.PythonTypedDict,
-        pandas_engine.PythonNamedTuple,
-    ]
-)
+UNSUPPORTED_DTYPE_CLS: Set[Any] = {
+    pandas_engine.Interval,
+    pandas_engine.Period,
+    pandas_engine.Sparse,
+    pandas_engine.PydanticModel,
+    pandas_engine.Decimal,
+    pandas_engine.Date,
+    pandas_engine.PythonDict,
+    pandas_engine.PythonList,
+    pandas_engine.PythonTuple,
+    pandas_engine.PythonTypedDict,
+    pandas_engine.PythonNamedTuple,
+}
+
+if pandas_engine.PYARROW_INSTALLED and pandas_engine.PANDAS_2_0_0_PLUS:
+    UNSUPPORTED_DTYPE_CLS.update(
+        [
+            pandas_engine.ArrowBool,
+            pandas_engine.ArrowDecimal128,
+            pandas_engine.ArrowDictionary,
+            pandas_engine.ArrowFloat16,
+            pandas_engine.ArrowFloat32,
+            pandas_engine.ArrowFloat64,
+            pandas_engine.ArrowInt8,
+            pandas_engine.ArrowInt16,
+            pandas_engine.ArrowInt32,
+            pandas_engine.ArrowInt64,
+            pandas_engine.ArrowString,
+            pandas_engine.ArrowTimestamp,
+            pandas_engine.ArrowUInt8,
+            pandas_engine.ArrowUInt16,
+            pandas_engine.ArrowUInt32,
+            pandas_engine.ArrowUInt64,
+            pandas_engine.ArrowList,
+            pandas_engine.ArrowStruct,
+            pandas_engine.ArrowNull,
+            pandas_engine.ArrowDate32,
+            pandas_engine.ArrowDate64,
+            pandas_engine.ArrowDuration,
+            pandas_engine.ArrowTime32,
+            pandas_engine.ArrowTime64,
+            pandas_engine.ArrowMap,
+            pandas_engine.ArrowBinary,
+            pandas_engine.ArrowLargeBinary,
+            pandas_engine.ArrowLargeString,
+        ]
+    )
+
 SUPPORTED_DTYPES = set()
 for data_type in pandas_engine.Engine.get_registered_dtypes():
     if (
@@ -53,8 +86,8 @@ for data_type in pandas_engine.Engine.get_registered_dtypes():
         or is_category(data_type)
         or data_type in UNSUPPORTED_DTYPE_CLS
         or (
-            pandas_engine.GEOPANDAS_INSTALLED
-            and data_type == pandas_engine.Geometry
+            geopandas_engine.GEOPANDAS_INSTALLED
+            and data_type == geopandas_engine.Geometry
         )
     ):
         continue
@@ -485,6 +518,15 @@ def test_dataframe_strategy(data_type, size, data):
         )
 
 
+def test_dataframe_strategy_empty_localized():
+    """Test DataFrameSchema strategy localizes timezones when empty."""
+    schema = pa.DataFrameSchema(
+        {"localized": pa.Column(pd.DatetimeTZDtype(tz="UTC", unit="ns"))}
+    )
+    example = schema.example(0)
+    schema(example)
+
+
 @pytest.mark.parametrize("size", [None, 0, 1, 3, 5])
 @hypothesis.given(st.data())
 def test_dataframe_strategy_with_check(size, data):
@@ -647,6 +689,7 @@ def test_multiindex_example() -> None:
             pa.Index(data_type, unique=True, name="level_0"),
             pa.Index(data_type, nullable=True),
             pa.Index(data_type),
+            pa.Index(pd.DatetimeTZDtype(tz="UTC", unit="ns")),
         ]
     )
     for _ in range(10):

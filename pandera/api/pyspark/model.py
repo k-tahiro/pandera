@@ -1,4 +1,5 @@
 """Class-based api for pyspark models."""
+
 # pylint:disable=abstract-method
 import copy
 import inspect
@@ -22,6 +23,7 @@ from typing import (
 )
 
 import pyspark.sql as ps
+from pyspark.sql.types import StructType
 
 from pandera.api.base.model import BaseModel
 from pandera.api.checks import Check
@@ -39,6 +41,7 @@ from pandera.api.pyspark.model_config import BaseConfig
 from pandera.errors import SchemaInitError
 from pandera.typing import AnnotationInfo
 from pandera.typing.common import DataFrameBase
+from pandera.typing.pyspark import DataFrame
 
 try:
     from typing_extensions import get_type_hints
@@ -126,7 +129,7 @@ class DataFrameModel(BaseModel):
     *new in 0.16.0*
 
 
-    See the :ref:`User Guide <dataframe_models>` for more.
+    See the :ref:`User Guide <dataframe-models>` for more.
     """
 
     Config: Type[BaseConfig] = BaseConfig
@@ -272,6 +275,22 @@ class DataFrameModel(BaseModel):
         return cls.to_schema().to_yaml(stream)
 
     @classmethod
+    def to_structtype(cls) -> StructType:
+        """Recover fields of DataFrameModel as a Pyspark StructType object.
+
+        :returns: StructType object with current model fields.
+        """
+        return cls.to_schema().to_structtype()
+
+    @classmethod
+    def to_ddl(cls) -> str:
+        """Recover fields of DataFrameModel as a Pyspark DDL string.
+
+        :returns: String with current model fields, in compact DDL format.
+        """
+        return cls.to_schema().to_ddl()
+
+    @classmethod
     @docstring_substitution(validate_doc=DataFrameSchema.validate.__doc__)
     def validate(
         cls: Type[TDataFrameModel],
@@ -282,10 +301,10 @@ class DataFrameModel(BaseModel):
         random_state: Optional[int] = None,
         lazy: bool = True,
         inplace: bool = False,
-    ) -> Optional[DataFrameBase[TDataFrameModel]]:
+    ) -> DataFrame[TDataFrameModel]:
         """%(validate_doc)s"""
         return cast(
-            DataFrameBase[TDataFrameModel],
+            DataFrame[TDataFrameModel],
             cls.to_schema().validate(
                 check_obj, head, tail, sample, random_state, lazy, inplace
             ),
@@ -505,18 +524,6 @@ class DataFrameModel(BaseModel):
         meta = {}
         meta[cls.Config.name] = res
         return meta
-
-
-SchemaModel = DataFrameModel
-"""
-Alias for DataFrameModel.
-
-.. warning::
-
-   This subclass is necessary for backwards compatibility, and will be
-   deprecated in pandera version ``0.20.0`` in favor of
-   :py:class:`~pandera.api.pyspark.model.DataFrameModel`
-"""
 
 
 def _regex_filter(seq: Iterable, regexps: Iterable[str]) -> Set[str]:

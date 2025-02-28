@@ -9,7 +9,7 @@ import pytest
 
 import pandera as pa
 from pandera import extensions
-from pandera.engines import numpy_engine, pandas_engine
+from pandera.engines import numpy_engine, pandas_engine, geopandas_engine
 from pandera.typing.modin import DataFrame, Index, Series, modin_version
 from tests.strategies.test_strategies import NULLABLE_DTYPES
 from tests.strategies.test_strategies import (
@@ -40,8 +40,8 @@ for dtype_cls in pandas_engine.Engine.get_registered_dtypes():
             not in SUPPORTED_STRATEGY_DTYPES
         )
         or not (
-            pandas_engine.GEOPANDAS_INSTALLED
-            and dtype_cls == pandas_engine.Geometry
+            geopandas_engine.GEOPANDAS_INSTALLED
+            and dtype_cls == geopandas_engine.Geometry
         )
     ):
         continue
@@ -167,8 +167,8 @@ def test_index_dtypes(
         # pylint: disable=no-value-for-parameter
         if dt in NULLABLE_DTYPES
         and not (
-            pandas_engine.GEOPANDAS_INSTALLED
-            and dt == pandas_engine.Engine.dtype(pandas_engine.Geometry)
+            geopandas_engine.GEOPANDAS_INSTALLED
+            and dt == pandas_engine.Engine.dtype(geopandas_engine.Geometry)
         )
     ],
 )
@@ -380,6 +380,11 @@ def test_schema_model():
 )
 def test_check_comparison_operators(check, valid, invalid):
     """Test simple comparison operators."""
+    from pandera.backends.pandas.register import register_pandas_backends
+
+    # NOTE: this should automatically be handles in the check.__call__ method
+    register_pandas_backends("modin.Series")
+
     valid_check_result = check(mpd.Series([valid] * 3))
     invalid_check_result = check(mpd.Series([invalid] * 3))
     assert valid_check_result.check_passed
