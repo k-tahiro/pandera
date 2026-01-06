@@ -13,6 +13,7 @@ from polars.datatypes import (
     Categorical,
     Date,
     Datetime,
+    Decimal,
     Duration,
     Float32,
     Float64,
@@ -262,6 +263,12 @@ class TestEqualToCheck(BaseClass):
                     ),
                 },
                 {
+                    "datatype": Decimal(precision=38, scale=10),
+                    "data": self.convert_data(
+                        self.sample_numeric_data, "decimal"
+                    ),
+                },
+                {
                     "datatype": Date,
                     "data": self.convert_data(
                         self.sample_datetime_data, "date"
@@ -431,6 +438,12 @@ class TestNotEqualToCheck(BaseClass):
                     ),
                 },
                 {
+                    "datatype": Decimal(precision=38, scale=10),
+                    "data": self.convert_data(
+                        self.sample_numeric_data, "decimal"
+                    ),
+                },
+                {
                     "datatype": Date,
                     "data": self.convert_data(
                         self.sample_datetime_data, "date"
@@ -542,6 +555,12 @@ class TestGreaterThanCheck(BaseClass):
                     ),
                 },
                 {
+                    "datatype": Decimal(precision=38, scale=10),
+                    "data": self.convert_data(
+                        self.sample_numeric_data, "decimal"
+                    ),
+                },
+                {
                     "datatype": Date,
                     "data": self.convert_data(
                         self.sample_datetime_data, "date"
@@ -645,6 +664,12 @@ class TestGreaterThanEqualToCheck(BaseClass):
                     "datatype": Float64,
                     "data": self.convert_data(
                         self.sample_numeric_data, "float64"
+                    ),
+                },
+                {
+                    "datatype": Decimal(precision=38, scale=10),
+                    "data": self.convert_data(
+                        self.sample_numeric_data, "decimal"
                     ),
                 },
                 {
@@ -758,6 +783,12 @@ class TestLessThanCheck(BaseClass):
                     ),
                 },
                 {
+                    "datatype": Decimal(precision=38, scale=10),
+                    "data": self.convert_data(
+                        self.sample_numeric_data, "decimal"
+                    ),
+                },
+                {
                     "datatype": Date,
                     "data": self.convert_data(
                         self.sample_datetime_data, "date"
@@ -861,6 +892,12 @@ class TestLessThanEqualToCheck(BaseClass):
                     "datatype": Float64,
                     "data": self.convert_data(
                         self.sample_numeric_data, "float64"
+                    ),
+                },
+                {
+                    "datatype": Decimal(precision=38, scale=10),
+                    "data": self.convert_data(
+                        self.sample_numeric_data, "decimal"
                     ),
                 },
                 {
@@ -985,6 +1022,13 @@ class TestIsInCheck(BaseClass):
                         self.sample_numeric_data, "float64"
                     ),
                 },
+                # FIXME(deepyaman): pandera.errors.SchemaError: InvalidOperationError("'is_in' cannot check for List(Decimal(38, 0)) values in Decimal(38, 10) data
+                # {
+                #     "datatype": Decimal(precision=38, scale=10),
+                #     "data": self.convert_data(
+                #         self.sample_numeric_data, "decimal"
+                #     ),
+                # },
                 {
                     "datatype": Date,
                     "data": self.convert_data(
@@ -1110,6 +1154,13 @@ class TestNotInCheck(BaseClass):
                         self.sample_numeric_data, "float64"
                     ),
                 },
+                # FIXME(deepyaman): pandera.errors.SchemaError: InvalidOperationError("'is_in' cannot check for List(Decimal(38, 0)) values in Decimal(38, 10) data
+                # {
+                #     "datatype": Decimal(precision=38, scale=10),
+                #     "data": self.convert_data(
+                #         self.sample_numeric_data, "decimal"
+                #     ),
+                # },
                 {
                     "datatype": Date,
                     "data": self.convert_data(
@@ -1336,6 +1387,10 @@ class TestInRangeCheck(BaseClass):
                 "data": self.convert_data(self.sample_numeric_data, "float64"),
             },
             {
+                "datatype": Decimal(precision=38, scale=10),
+                "data": self.convert_data(self.sample_numeric_data, "decimal"),
+            },
+            {
                 "datatype": Date,
                 "data": self.convert_data(self.sample_datetime_data, "date"),
             },
@@ -1505,6 +1560,12 @@ class TestUniqueValuesEqCheck(BaseClass):
                     "datatype": Float64,
                     "data": self.convert_data(
                         self.sample_numeric_data, "float64"
+                    ),
+                },
+                {
+                    "datatype": Decimal(precision=38, scale=10),
+                    "data": self.convert_data(
+                        self.sample_numeric_data, "decimal"
                     ),
                 },
                 {
