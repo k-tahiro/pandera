@@ -28,6 +28,21 @@ pip install 'pandera[polars]'
 As of `pandera >= 0.21.0`, only `polars >= 1.0.0` is supported.
 :::
 
+:::{note}
+*new in 0.32.0*; Pandera ships an optional
+{ref}`Narwhals-powered backend <narwhals-backends>` that keeps validation
+fully lazy and unifies the implementation with the Ibis backend. It is
+**opt-in**: install the `narwhals` extra and set
+`PANDERA_USE_NARWHALS_BACKEND=True` (or `pandera.config.CONFIG.use_narwhals_backend = True`)
+before importing `pandera.polars`. By default Pandera uses the native
+Polars backend. The public API shown on this page is unchanged either way.
+
+```bash
+pip install 'pandera[polars,narwhals]'
+export PANDERA_USE_NARWHALS_BACKEND=True
+```
+:::
+
 Then you can use pandera schemas to validate polars dataframes. In the example
 below we'll use the {ref}`class-based API <dataframe-models>` to define a
 {py:class}`~pandera.api.polars.model.DataFrameModel`, which we then use to
